@@ -1,2 +1,8 @@
-# dlib-models-training
-Training pipelines and scripts for models using Dlib. Includes pre-configured setups for fine-tuning and evaluating models from the "davisking/dlib-models" repository.
+# Dlib Model Training Toolkit
+
+## Universal Dlib Training Pipelines
+
+This repository provides modular training c++ programs for:
+- ✅ Any Dlib-compatible model architecture
+- ✅ Any image dataset (including custom datasets)
+- ✅ Multiple training scenarios (from scratch/fine-tuning)
