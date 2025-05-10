@@ -345,7 +345,7 @@ namespace vit
             - patch_size: Size of image patches (assumed square)
     !*/
     template <long d_model, long patch_size, typename SUBNET>
-    using patch_embedding = add_prev9<linear<d_model, tag9<htan<patches_to_sequence<layer_norm<con<d_model, patch_size, patch_size, patch_size, patch_size, SUBNET>>>>>>>;
+    using patch_embedding = layer_norm<add_prev9<linear<d_model, tag9<htan<patches_to_sequence<con<d_model, patch_size, patch_size, patch_size, patch_size, SUBNET>>>>>>>;
 
     /*!
         WHAT THIS OBJECT REPRESENTS
@@ -398,10 +398,10 @@ namespace vit
 
         // Network component definitions
         template <typename SUBNET>
-        using t_output = avg_pool_everything<activation_func<dropout_policy<fc_no_bias<EMBEDDING_DIM * 4, SUBNET>>>>;
+        using t_output = avg_pool_everything<activation_func<dropout_policy<fc_no_bias<EMBEDDING_DIM, SUBNET>>>>;
 
         template <typename SUBNET>
-        using i_output = avg_pool_everything<activation_func<multiply<fc_no_bias<EMBEDDING_DIM * 4, SUBNET>>>>;
+        using i_output = avg_pool_everything<activation_func<multiply<fc_no_bias<EMBEDDING_DIM, SUBNET>>>>;
 
         template <typename SUBNET>
         using t_transformer_block = transformer_block<activation_func, dropout_policy, NUM_PATCHES, EMBEDDING_DIM, NUM_HEADS, SUBNET>;

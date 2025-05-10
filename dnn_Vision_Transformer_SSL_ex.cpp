@@ -62,42 +62,6 @@ using namespace dlib;
 */
 #ifdef __USE_VIT__
 
-namespace densenet
-{
-    using namespace dlib;
-
-    // ACT peut être une couche d'activation, BN doit être bn_con ou affine
-    template <template <typename> class ACT, template <typename> class BN>
-    struct def
-    {
-        template <long num_filters, long ks, int s, typename SUBNET>
-        using conp = add_layer<con_<num_filters, ks, ks, s, s, ks / 2, ks / 2>, SUBNET>;
-
-        template <typename INPUT>
-        using stem = add_layer<max_pool_<3, 3, 2, 2, 1, 1>, INPUT>;
-
-        template <long num_filters, typename SUBNET>
-        using transition = avg_pool<2, 2, 2, 2, con<num_filters, 1, 1, 1, 1, ACT<BN<SUBNET>>>>;
-
-        template <long growth_rate, typename SUBNET>
-        using dense_layer = concat2<tag1, tag2,
-            tag2<conp<growth_rate, 3, 1,
-            ACT<BN<conp<4 * growth_rate, 1, 1,
-            ACT<BN<tag1<SUBNET>>>>>>>>>;
-
-        template <typename SUBNET> using dense_layer_growth = dense_layer<32, SUBNET>;
-
-        template <size_t nb_1024, size_t nb_512, size_t nb_256, size_t nb_128, typename INPUT>
-        using backbone =
-            repeat<nb_1024, dense_layer_growth, transition<512,
-            repeat<nb_512, dense_layer_growth, transition<256,
-            repeat<nb_256, dense_layer_growth, transition<128,
-            repeat<nb_128, dense_layer_growth, stem<INPUT>>>>>>>>;
-
-        template <typename INPUT> using backbone_121 = backbone<16, 24, 12, 6, INPUT>;
-    };
-}  // namespace densenet
-
 namespace vit
 {
     /*!
@@ -307,7 +271,7 @@ namespace vit
             - patch_size: Size of image patches (assumed square)
     !*/
     template <long d_model, long patch_size, typename SUBNET>
-    using patch_embedding = add_prev9<linear<d_model, tag9<htan<patches_to_sequence<layer_norm<con<d_model, patch_size, patch_size, patch_size, patch_size, SUBNET>>>>>>>;
+    using patch_embedding = layer_norm<add_prev9<linear<d_model, tag9<htan<patches_to_sequence<con<d_model, patch_size, patch_size, patch_size, patch_size, SUBNET>>>>>>>;
 
     /*!
         WHAT THIS OBJECT REPRESENTS
@@ -360,12 +324,10 @@ namespace vit
 
         // Network component definitions
         template <typename SUBNET>
-        using t_output = avg_pool_everything<activation_func<dropout_policy<fc_no_bias<EMBEDDING_DIM * 4, SUBNET>>>>;
-        //using t_output = avg_pool_everything<densenet::def<relu, bn_con>::backbone_121<SUBNET>>;
+        using t_output = avg_pool_everything<activation_func<dropout_policy<fc_no_bias<EMBEDDING_DIM, SUBNET>>>>;
 
         template <typename SUBNET>
-        using i_output = avg_pool_everything<activation_func<multiply<fc_no_bias<EMBEDDING_DIM * 4, SUBNET>>>>;
-        //using i_output = avg_pool_everything<densenet::def<relu, affine>::backbone_121<SUBNET>>;
+        using i_output = avg_pool_everything<activation_func<multiply<fc_no_bias<EMBEDDING_DIM, SUBNET>>>>;
 
         template <typename SUBNET>
         using t_transformer_block = transformer_block<activation_func, dropout_policy, NUM_PATCHES, EMBEDDING_DIM, NUM_HEADS, SUBNET>;
