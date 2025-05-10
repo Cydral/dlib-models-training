@@ -698,6 +698,7 @@ try
 #endif
     trainer.be_verbose();
     trainer.set_learning_rate(learning_rate);
+    trainer.set_mini_batch_size(batch_size);
 #ifdef __USE_VIT__
     trainer.set_synchronization_file("vit_stable_imagenet_trainer.sync", std::chrono::minutes(15));
 #else

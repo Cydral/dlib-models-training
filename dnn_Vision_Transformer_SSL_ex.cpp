@@ -300,14 +300,14 @@ namespace vit
 
     /*!
         This layer projects image patches into an embedding space and adds
-        position embeddings to maintain spatial information.
+        learned position embeddings to maintain spatial information.
 
         Template parameters:
             - d_model: Embedding dimension
             - patch_size: Size of image patches (assumed square)
     !*/
     template <long d_model, long patch_size, typename SUBNET>
-    using patch_embedding = positional_encodings<sig<patches_to_sequence<layer_norm<con<d_model, patch_size, patch_size, patch_size, patch_size, SUBNET>>>>>;
+    using patch_embedding = add_prev9<linear<d_model, tag9<htan<patches_to_sequence<layer_norm<con<d_model, patch_size, patch_size, patch_size, patch_size, SUBNET>>>>>>>;
 
     /*!
         WHAT THIS OBJECT REPRESENTS
@@ -453,7 +453,7 @@ namespace model
         4,          // Patch size 
         6,          // Transformer layers
         8,          // Attention heads
-        64,         // Embedding dimension
+        192,        // Embedding dimension
         gelu,       // Use GELU activation
         dropout_10  // Use 10% dropout
     >;
