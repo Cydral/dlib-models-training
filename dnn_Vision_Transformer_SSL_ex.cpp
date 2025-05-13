@@ -42,28 +42,204 @@ using namespace dlib;
 #define __USE_VIT__ 1
 
 /*!
-    This part defines a Vision Transformer (ViT) architecture for image processing.
+    This module implements a complete Vision Transformer (ViT) architecture with
+    support for both standard and Mixture-of-Experts (MoE) variants.
 
-    ViT divides input images into fixed-size patches, linearly embeds them,
-    adds position embeddings, and processes the resulting sequence with standard
-    transformer encoder blocks. This approach has proven effective for various
-    computer vision tasks while maintaining a pure attention-based mechanism.
+    KEY COMPONENTS:
+    1. Patch Processing:
+       - Image splitting and linear embedding
+       - Learned position embeddings (RoPE)
+       - Sequence format conversion
 
-    DESIGN:
-        - Images are divided into non-overlapping patches
-        - Each patch is linearly projected to create embeddings
-        - Position embeddings are added to maintain spatial relationships
-        - Sequence is processed by transformer encoder blocks
-        - Compatible with both grayscale and RGB input images
-        - Accepts arbitrary input layer types (for network composition)
+    2. Transformer Core:
+       - Multi-head self-attention with RoPE
+       - Configurable feed-forward networks:
+         * Standard FFN (dense)
+         * MoE variant with expert routing
+       - Residual connections and layer normalization
 
-    The implementation is designed to be compatible with dlib's deep learning
-    framework and includes efficient custom layers and common ViT configurations.
+    3. Architectural Features:
+       - Rotary Positional Embeddings (RoPE)
+       - Attention scaling for stability
+       - Configurable dropout and activation
+       - Training/inference mode switching
+
+    UNIQUE ASPECTS:
+    - Pure attention-based vision processing
+    - Support for both dense and sparse (MoE) FFNs
+    - Memory-efficient RoPE implementation
+    - Flexible configuration system
+    - Full dlib framework integration
 */
 #ifdef __USE_VIT__
-
 namespace vit
 {
+    /*!
+        Rotary Positional Embedding Layer (RoPE)
+        Implements positional encoding via rotation of query/key vectors
+        and handles both forward and backward passes.
+    */
+    class rotary_positional_embedding_ {
+    public:
+        explicit rotary_positional_embedding_(void) {
+        }
+
+        template <typename SUBNET>
+        void setup(const SUBNET& sub) {
+            // Precompute the rotation angles and their trigonometric values
+            seq_len = sub.get_output().nr();
+            d_head = sub.get_output().nc();
+            compute_rotation_angles();
+            precompute_trigonometric_values();
+        }
+
+        template <typename SUBNET>
+        void forward(const SUBNET& sub, resizable_tensor& output) {
+            const tensor& input = sub.get_output();
+            output.copy_size(input);
+            tt::copy_tensor(false, output, 0, input, 0, input.k());
+
+            // Apply rotary embedding to the output
+            apply_rotary_embedding(output);
+        }
+
+        template <typename SUBNET>
+        void backward(
+            const tensor& gradient_input,
+            SUBNET& sub,
+            tensor& params_grad
+        ) {
+            tensor& prev = sub.get_gradient_input();
+            resizable_tensor grad_output;
+            grad_output.copy_size(gradient_input);
+            tt::copy_tensor(false, grad_output, 0, gradient_input, 0, gradient_input.k());
+
+            // Apply the inverse rotation to the gradient (transpose of the rotation matrix)
+            apply_rotary_embedding(grad_output, true);
+            tt::copy_tensor(true, prev, 0, grad_output, 0, grad_output.k());
+        }
+
+        const tensor& get_layer_params() const { return params; }
+        tensor& get_layer_params() { return params; }
+
+        friend void serialize(const rotary_positional_embedding_& item, std::ostream& out) {
+            serialize("rotary_positional_embedding_", out);
+            serialize(item.seq_len, out);
+            serialize(item.d_head, out);
+            serialize(item.angles, out);
+            serialize(item.cos_values, out);
+            serialize(item.sin_values, out);
+        }
+
+        friend void deserialize(rotary_positional_embedding_& item, std::istream& in) {
+            std::string version;
+            deserialize(version, in);
+            if (version != "rotary_positional_embedding_")
+                throw serialization_error("Unexpected version found while deserializing rotary_positional_embedding_.");
+            deserialize(item.seq_len, in);
+            deserialize(item.d_head, in);
+            deserialize(item.angles, in);
+            deserialize(item.cos_values, in);
+            deserialize(item.sin_values, in);
+        }
+
+        friend std::ostream& operator<<(std::ostream& out, const rotary_positional_embedding_& item) {
+            out << "rotary_positional_embedding";
+            out << " (d_head=" << item.d_head << ", seq_len=" << item.seq_len << ")";
+            return out;
+        }
+
+        friend void to_xml(const rotary_positional_embedding_& item, std::ostream& out)
+        {
+            out << "<rotary_positional_embedding"
+                << " d_head='" << item.d_head << "'"
+                << " seq_len='" << item.seq_len << "'"
+                << "/>\n";
+        }
+
+    protected:
+        void compute_rotation_angles() {
+            // Following the original RoPE paper formulation
+            const float base = 10000.0f;
+            const long half_dim = d_head / 2;
+            angles.set_size(seq_len, half_dim);
+
+            for (long pos = 0; pos < seq_len; ++pos) {
+                for (long i = 0; i < half_dim; ++i) {
+                    float exponent = -2.0f * (i + 0.5f) / d_head;
+                    float inv_freq = std::pow(base, exponent);
+                    angles(pos, i) = pos * std::pow(base, exponent);
+                }
+            }
+        }
+
+        void precompute_trigonometric_values() {
+            // Precompute cos and sin for all angles
+            cos_values.set_size(angles.nr(), angles.nc());
+            sin_values.set_size(angles.nr(), angles.nc());
+
+            for (long i = 0; i < angles.size(); ++i) {
+                cos_values(i) = std::cos(angles(i));
+                sin_values(i) = std::sin(angles(i));
+            }
+        }
+
+        template <typename tensor_type>
+        void apply_rotary_embedding(
+            tensor_type& x,
+            bool is_backward = false
+        ) const {
+            const long batch_size = x.num_samples();
+            const long num_heads = x.k();
+            const long seq_length = x.nr();
+            const long dim = x.nc();
+            const bool is_odd = (dim % 2 != 0);
+            const long rot_dim = is_odd ? dim - 1 : dim;
+
+            DLIB_CASSERT(dim == d_head, "Input dimension must match d_head param");
+            DLIB_CASSERT(seq_length == seq_len, "Sequence length must match seq_len param");
+
+            auto* ptr = x.host();
+            const long stride = seq_length * dim;
+
+            for (long n = 0; n < batch_size; ++n) {
+                for (long h = 0; h < num_heads; ++h) {
+                    auto* x_ptr = ptr + (n * num_heads + h) * stride;
+
+                    for (long pos = 0; pos < seq_length; ++pos) {
+                        const float* cos = &cos_values(pos, 0);
+                        const float* sin = &sin_values(pos, 0);
+
+                        for (long i = 0; i < rot_dim; i += 2) {
+                            const float x0 = x_ptr[pos * dim + i];
+                            const float x1 = x_ptr[pos * dim + i + 1];
+
+                            if (!is_backward) {
+                                x_ptr[pos * dim + i] = x0 * cos[i / 2] - x1 * sin[i / 2];
+                                x_ptr[pos * dim + i + 1] = x0 * sin[i / 2] + x1 * cos[i / 2];
+                            }
+                            else {
+                                x_ptr[pos * dim + i] = x0 * cos[i / 2] + x1 * sin[i / 2];
+                                x_ptr[pos * dim + i + 1] = -x0 * sin[i / 2] + x1 * cos[i / 2];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+    private:
+        long seq_len, d_head;       // Sequence length and dimension of each head
+        matrix<float> angles;       // Precomputed rotation angles (seq_len x d_head/2)
+        matrix<float> cos_values;   // Precomputed cosine values
+        matrix<float> sin_values;   // Precomputed sine values
+        resizable_tensor params;    // Empty tensor (no learnable parameters)
+    };
+
+    // Helper to easily add RoPE to a network
+    template <typename SUBNET>
+    using rope = add_layer<rotary_positional_embedding_, SUBNET>;
+
     /*!
         WHAT THIS OBJECT REPRESENTS
             This object represents a custom layer that rearranges convolutional
@@ -224,25 +400,59 @@ namespace vit
         DO<linear_no_bias<d_model, reshape_to<1, seq_len, d_model,
         multm_prev2<softmaxm<tril_mask<
         scale_weights<d_model / num_heads,
-        multm_prev3<query<seq_len, d_model, num_heads, skip1<
-        tag3<transpose<key<seq_len, d_model, num_heads, skip1<
+        multm_prev3<
+        // Apply RoPE to queries & keys
+        rope<query<seq_len, d_model, num_heads, skip1<
+        tag3<transpose<
+        rope<key<seq_len, d_model, num_heads, skip1<
         tag2<value<seq_len, d_model, num_heads,
-        tag1<SUBNET>>>>>>>>>>>>>>>>>>>;
+        tag1<SUBNET>>>>>>>>>>>>>>>>>>>>>;
 
     /*!
-        This layer implements the feed-forward network component of transformer blocks.
-        It consists of two linear layers with an activation function in between.
+        Mixture-of-Experts components:
+    !*/
+    // Expert router that selects between N experts
+    // Uses softmax over scaled logits for probability distribution
+    template <long num_experts, typename SUBNET>
+    using moe_router = softmax<fc<num_experts, SUBNET>>;
 
-        Template parameters:
-            - ACT: Activation function type
-            - DO: Dropout layer type for regularization
-            - d_model: Model dimension (input and output feature dimension)
+    // Single expert network (same structure as standard FFN)
+    // Typically multiple experts run in parallel
+    template <template <typename> class ACT, template <typename> class DO,
+        long d_model, typename SUBNET>
+    using expert = DO<linear<d_model, ACT<DO<linear<d_model * 4, SUBNET>>>>>;
+
+    // Combines expert outputs using router probabilities
+    // Performs weighted sum of experts with residual connection
+    template <template <typename> class ACT, template <typename> class DO,
+        long d_model, typename SUBNET>
+    using weighted_sum_of_experts = add_prev<itag3,
+        mult_prev<itag1, extract<0, 1, 1, 1, skip6<         // Expert 1
+        itag1<expert<ACT, DO, d_model, iskip<
+        itag3<mult_prev<itag2, extract<1, 1, 1, 1, skip6<   // Expert 2
+        itag2<expert<ACT, DO, d_model,
+        itag0<SUBNET>>>>>>>>>>>>>>;
+
+    // Complete MoE feed-forward layer
+    template <template <typename> class ACT, template <typename> class DO,
+        long d_model, typename SUBNET>
+    using moe_feed_forward =
+        rms_norm<add_prev5<
+        weighted_sum_of_experts<ACT, DO, d_model, skip5<
+        tag6<moe_router<2,
+        tag5<SUBNET>>>>>>>;
+
+    /*!
+        Standard feed-forward network (FFN) for transformers.
+        Expands to 4*d_model then projects back to d_model.
+        Includes activation, dropout and residual connection.
     !*/
     template <template <typename> class ACT, template <typename> class DO,
         long d_model, typename SUBNET>
     using feed_forward =
-        rms_norm<add_prev5<DO<
-        linear<d_model, ACT<DO<linear<d_model * 4,
+        rms_norm<add_prev5<
+        DO<linear<d_model,
+        ACT<DO<linear<d_model * 4,
         tag5<SUBNET>>>>>>>>;
 
     /*!
@@ -258,8 +468,13 @@ namespace vit
     !*/
     template <template <typename> class ACT, template <typename> class DO,
         long seq_len, long d_model, long num_heads, typename SUBNET>
-    using transformer_block =
+    using transformer_block_std =
         feed_forward<ACT, DO, d_model,
+        multihead_attention<ACT, DO, seq_len, d_model, num_heads, SUBNET>>;
+    template <template <typename> class ACT, template <typename> class DO,
+        long seq_len, long d_model, long num_heads, typename SUBNET>
+    using transformer_block_moe =
+        moe_feed_forward<ACT, DO, d_model,
         multihead_attention<ACT, DO, seq_len, d_model, num_heads, SUBNET>>;
 
     /*!
@@ -271,7 +486,7 @@ namespace vit
             - patch_size: Size of image patches (assumed square)
     !*/
     template <long d_model, long patch_size, typename SUBNET>
-    using patch_embedding = layer_norm<add_prev9<linear<d_model, tag9<htan<patches_to_sequence<con<d_model, patch_size, patch_size, patch_size, patch_size, SUBNET>>>>>>>;
+    using patch_embedding = layer_norm<sig<linear<d_model, patches_to_sequence<con<d_model, patch_size, patch_size, patch_size, patch_size, SUBNET>>>>>;
 
     /*!
         WHAT THIS OBJECT REPRESENTS
@@ -282,8 +497,7 @@ namespace vit
             A Vision Transformer (ViT) processes images by:
             1) Dividing the image into fixed-size patches
             2) Linearly embedding each patch
-            3) Adding position embeddings
-            4) Processing the sequence with transformer encoder blocks
+            3) Processing the sequence with transformer encoder blocks
 
         Template parameters:
             - image_size: Input image size (assumed square)
@@ -300,6 +514,7 @@ namespace vit
         long num_layers = 12,
         long num_heads = 8,
         long embedding_dim = 768,
+        bool use_moe = false,
         template <typename> class activation_func = gelu,
         template <typename> class dropout_policy = dropout_10
     >
@@ -311,6 +526,7 @@ namespace vit
         static constexpr long NUM_HEADS = num_heads;
         static constexpr long EMBEDDING_DIM = embedding_dim;
         static constexpr long NUM_PATCHES = (IMAGE_SIZE / PATCH_SIZE) * (IMAGE_SIZE / PATCH_SIZE);
+        static constexpr bool USE_MOE = use_moe;
 
         // Runtime configuration validation
         struct validation {
@@ -324,27 +540,28 @@ namespace vit
 
         // Network component definitions
         template <typename SUBNET>
-        using t_output = avg_pool_everything<activation_func<dropout_policy<fc_no_bias<EMBEDDING_DIM, SUBNET>>>>;
+        using t_output = avg_pool_everything<activation_func<dropout_policy<fc<EMBEDDING_DIM, SUBNET>>>>;
 
         template <typename SUBNET>
-        using i_output = avg_pool_everything<activation_func<multiply<fc_no_bias<EMBEDDING_DIM, SUBNET>>>>;
+        using i_output = avg_pool_everything<activation_func<multiply<fc<EMBEDDING_DIM, SUBNET>>>>;
 
         template <typename SUBNET>
-        using t_transformer_block = transformer_block<activation_func, dropout_policy, NUM_PATCHES, EMBEDDING_DIM, NUM_HEADS, SUBNET>;
+        using t_transformer_block = std::conditional_t<USE_MOE,
+            transformer_block_moe<activation_func, dropout_policy, NUM_PATCHES, EMBEDDING_DIM, NUM_HEADS, SUBNET>,
+            transformer_block_std<activation_func, dropout_policy, NUM_PATCHES, EMBEDDING_DIM, NUM_HEADS, SUBNET>>;
 
         template <typename SUBNET>
-        using i_transformer_block = transformer_block<activation_func, multiply, NUM_PATCHES, EMBEDDING_DIM, NUM_HEADS, SUBNET>;
-
-        template <typename INPUT_LAYER>
-        using patches = patch_embedding<EMBEDDING_DIM, PATCH_SIZE, INPUT_LAYER>;
+        using i_transformer_block = std::conditional_t<USE_MOE,
+            transformer_block_moe<activation_func, multiply, NUM_PATCHES, EMBEDDING_DIM, NUM_HEADS, SUBNET>,
+            transformer_block_std<activation_func, multiply, NUM_PATCHES, EMBEDDING_DIM, NUM_HEADS, SUBNET>>;
 
         // Complete network definition (training vs inference mode)
         template<bool is_training, typename INPUT_LAYER>
         using network_type = std::conditional_t<is_training,
             t_output<repeat<NUM_LAYERS, t_transformer_block,
-            patches<INPUT_LAYER>>>,
+            patch_embedding<EMBEDDING_DIM, PATCH_SIZE, INPUT_LAYER>>>,
             i_output<repeat<NUM_LAYERS, i_transformer_block,
-            patches<INPUT_LAYER>>>>;
+            patch_embedding<EMBEDDING_DIM, PATCH_SIZE, INPUT_LAYER>>>>;
 
         // Model information utilities
         struct model_info {
@@ -356,6 +573,7 @@ namespace vit
                     << "- number of patches: " << NUM_PATCHES << "\n"
                     << "- layers: " << NUM_LAYERS << "\n"
                     << "- attention heads: " << NUM_HEADS << "\n"
+                    << "- MoE enabled: " << (USE_MOE ? "true" : "false") << "\n"
                     << "- embedding dimension: " << EMBEDDING_DIM;
                 return ss.str();
             }
@@ -413,9 +631,10 @@ namespace model
     using cifar10_vit_config = vit::vit_config<
         32,         // Image size (CIFAR-10 images are 32x32)
         4,          // Patch size 
-        6,          // Transformer layers
+        4,          // Transformer layers
         8,          // Attention heads
-        192,        // Embedding dimension
+        144,        // Embedding dimension
+		true,       // Use Mixture-of-Experts (MoE)
         gelu,       // Use GELU activation
         dropout_10  // Use 10% dropout
     >;
@@ -545,7 +764,7 @@ matrix<rgb_pixel> augment(
 
 int main(const int argc, const char** argv)
 try
-{
+{    
     // Setup interrupt handling for clean termination
     setup_interrupt_handler();
 
@@ -604,7 +823,7 @@ try
         trainer.set_mini_batch_size(batch_size);
         trainer.set_learning_rate(learning_rate);
         trainer.set_min_learning_rate(min_learning_rate);
-        trainer.set_iterations_without_progress_threshold(10000);
+        trainer.set_iterations_without_progress_threshold(15000);
 #ifdef __USE_VIT__
         trainer.set_synchronization_file("vit_barlow_twins_sync", std::chrono::minutes(30));
 #else
@@ -626,7 +845,7 @@ try
 
 #ifdef __USE_VIT__
         if (!file_exists("vit_barlow_twins_sync") &&
-            file_exists("vit_self_supervised_cifar_10.dat")) deserialize("vit_self_supervised_cifar_10.dat") >> net;
+            file_exists("vit-s-4_self_supervised_cifar_10.dat")) deserialize("vit-s-4_self_supervised_cifar_10.dat") >> net;
 #else
         if (!file_exists("resnet_barlow_twins_sync") &&
             file_exists("res50_self_supervised_cifar_10.dat")) deserialize("res50_self_supervised_cifar_10.dat") >> net;
@@ -675,8 +894,8 @@ try
         // After training, we can discard the projector head and just keep the backone
         // to train it or finetune it on other downstream tasks.
 #ifdef __USE_VIT__
-        serialize("vit_self_supervised_cifar_10.dat") << net;
-        cout << "ViT backbone saved to vit_self_supervised_cifar_10.dat" << endl;
+        serialize("vit-s-4_self_supervised_cifar_10.dat") << net;
+        cout << "ViT backbone saved to vit-s-4_self_supervised_cifar_10.dat" << endl;
 #else
         serialize("res50_self_supervised_cifar_10.dat") << net;
         cout << "Resnet-50 backbone saved to res50_self_supervised_cifar_10.dat" << endl;
