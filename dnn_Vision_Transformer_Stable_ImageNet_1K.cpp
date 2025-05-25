@@ -117,8 +117,7 @@ void load_stable_imagenet_1k(
 }
 
 /*!
-    This module implements a complete Vision Transformer (ViT) architecture with
-    support for both standard and Mixture-of-Experts (MoE) variants.
+    This module implements a complete Vision Transformer (ViT) architecture
 
     KEY COMPONENTS:
     1. Patch Processing:
@@ -128,9 +127,7 @@ void load_stable_imagenet_1k(
 
     2. Transformer Core:
        - Multi-head self-attention with RoPE
-       - Configurable feed-forward networks:
-         * Standard FFN (dense)
-         * MoE variant with expert routing
+       - Standard FFN (dense)
        - Residual connections and layer normalization
 
     3. Architectural Features:
@@ -141,7 +138,6 @@ void load_stable_imagenet_1k(
 
     UNIQUE ASPECTS:
     - Pure attention-based vision processing
-    - Support for both dense and sparse (MoE) FFNs
     - Memory-efficient RoPE implementation
     - Flexible configuration system
     - Full dlib framework integration
@@ -156,7 +152,8 @@ namespace vit
     */
     class rotary_positional_embedding_ {
     public:
-        explicit rotary_positional_embedding_(void) {
+        rotary_positional_embedding_(void)
+        {
         }
 
         template <typename SUBNET>
@@ -484,40 +481,6 @@ namespace vit
         tag1<SUBNET>>>>>>>>>>>>>>>>>>>>>;
 
     /*!
-        Mixture-of-Experts components:
-    !*/
-    // Expert router that selects between N experts
-    // Uses softmax over scaled logits for probability distribution
-    template <long num_experts, typename SUBNET>
-    using moe_router = softmax<fc<num_experts, SUBNET>>;
-
-    // Single expert network (same structure as standard FFN)
-    // Typically multiple experts run in parallel
-    template <template <typename> class ACT, template <typename> class DO,
-        long d_model, typename SUBNET>
-    using expert = DO<linear<d_model, ACT<DO<linear<d_model * 4, SUBNET>>>>>;
-
-    // Combines expert outputs using router probabilities
-    // Performs weighted sum of experts with residual connection
-    template <template <typename> class ACT, template <typename> class DO,
-        long d_model, typename SUBNET>
-    using weighted_sum_of_experts = add_prev<itag3,
-        mult_prev<itag1, extract<0, 1, 1, 1, skip6<         // Expert 1
-        itag1<expert<ACT, DO, d_model, iskip<
-		itag3<mult_prev<itag2, extract<1, 1, 1, 1, skip6<   // Expert 2
-        itag2<expert<ACT, DO, d_model,
-        itag0<SUBNET>>>>>>>>>>>>>>;
-
-    // Complete MoE feed-forward layer
-    template <template <typename> class ACT, template <typename> class DO,
-        long d_model, typename SUBNET>
-    using moe_feed_forward =
-        rms_norm<add_prev5<
-		weighted_sum_of_experts<ACT, DO, d_model, skip5<
-        tag6<moe_router<2,
-        tag5<SUBNET>>>>>>>;
-
-    /*!
         Standard feed-forward network (FFN) for transformers.
         Expands to 4*d_model then projects back to d_model.
         Includes activation, dropout and residual connection.
@@ -543,13 +506,8 @@ namespace vit
     !*/
     template <template <typename> class ACT, template <typename> class DO,
         long seq_len, long d_model, long num_heads, typename SUBNET>
-    using transformer_block_std =
+    using transformer_block =
         feed_forward<ACT, DO, d_model,
-        multihead_attention<ACT, DO, seq_len, d_model, num_heads, SUBNET>>;
-    template <template <typename> class ACT, template <typename> class DO,
-        long seq_len, long d_model, long num_heads, typename SUBNET>
-    using transformer_block_moe =
-        moe_feed_forward<ACT, DO, d_model,
         multihead_attention<ACT, DO, seq_len, d_model, num_heads, SUBNET>>;
 
     /*!
@@ -588,8 +546,7 @@ namespace vit
         long patch_size = 16,
         long num_layers = 12,
         long num_heads = 8,
-        long embedding_dim = 768,
-        bool use_moe = false,
+        long embedding_dim = 768,        
         template <typename> class activation_func = gelu,
         template <typename> class dropout_policy = dropout_10
     >
@@ -601,7 +558,6 @@ namespace vit
         static constexpr long NUM_HEADS = num_heads;
         static constexpr long EMBEDDING_DIM = embedding_dim;
         static constexpr long NUM_PATCHES = (IMAGE_SIZE / PATCH_SIZE) * (IMAGE_SIZE / PATCH_SIZE);
-        static constexpr bool USE_MOE = use_moe;
 
         // Runtime configuration validation
         struct validation {
@@ -615,27 +571,25 @@ namespace vit
 
         // Network component definitions
         template <typename SUBNET>
-        using t_output = avg_pool_everything<activation_func<dropout_policy<fc<EMBEDDING_DIM, SUBNET>>>>;
+        using t_projection = avg_pool_everything<fc<EMBEDDING_DIM, relu<bn_fc<fc<EMBEDDING_DIM * 2, SUBNET>>>>>;
 
         template <typename SUBNET>
-        using i_output = avg_pool_everything<activation_func<multiply<fc<EMBEDDING_DIM, SUBNET>>>>;
+        using i_projection = avg_pool_everything<fc<EMBEDDING_DIM, relu<affine<fc<EMBEDDING_DIM * 2, SUBNET>>>>>;
 
         template <typename SUBNET>
-        using t_transformer_block = std::conditional_t<USE_MOE,
-            transformer_block_moe<activation_func, dropout_policy, NUM_PATCHES, EMBEDDING_DIM, NUM_HEADS, SUBNET>,
-            transformer_block_std<activation_func, dropout_policy, NUM_PATCHES, EMBEDDING_DIM, NUM_HEADS, SUBNET>>;
+        using t_transformer_block =
+            transformer_block<activation_func, dropout_policy, NUM_PATCHES, EMBEDDING_DIM, NUM_HEADS, SUBNET>;
 
         template <typename SUBNET>
-        using i_transformer_block = std::conditional_t<USE_MOE,
-            transformer_block_moe<activation_func, multiply, NUM_PATCHES, EMBEDDING_DIM, NUM_HEADS, SUBNET>,
-            transformer_block_std<activation_func, multiply, NUM_PATCHES, EMBEDDING_DIM, NUM_HEADS, SUBNET>>;
+        using i_transformer_block =
+            transformer_block<activation_func, multiply, NUM_PATCHES, EMBEDDING_DIM, NUM_HEADS, SUBNET>;
 
         // Complete network definition (training vs inference mode)
         template<bool is_training, typename INPUT_LAYER>
         using network_type = std::conditional_t<is_training,
-            t_output<repeat<NUM_LAYERS, t_transformer_block,
+            t_projection<repeat<NUM_LAYERS, t_transformer_block,
             patch_embedding<EMBEDDING_DIM, PATCH_SIZE, INPUT_LAYER>>>,
-            i_output<repeat<NUM_LAYERS, i_transformer_block,
+            i_projection<repeat<NUM_LAYERS, i_transformer_block,
             patch_embedding<EMBEDDING_DIM, PATCH_SIZE, INPUT_LAYER>>>>;
 
         // Model information utilities
@@ -648,7 +602,6 @@ namespace vit
                     << "- number of patches: " << NUM_PATCHES << "\n"
                     << "- layers: " << NUM_LAYERS << "\n"
                     << "- attention heads: " << NUM_HEADS << "\n"
-                    << "- MoE enabled: " << (USE_MOE ? "true" : "false") << "\n"
                     << "- embedding dimension: " << EMBEDDING_DIM;
                 return ss.str();
             }
@@ -743,10 +696,7 @@ namespace model
         16,         // Patch size 
         4,          // Transformer layers
         6,          // Attention heads
-        192,        // Embedding dimension
-		true,       // Use Mixture-of-Experts
-        gelu,       // Use GELU activation
-        dropout_10  // Use 10% dropout
+        234         // Embedding dimension
     >;
     using train = loss_multiclass_log<fc<1000, imagenet_vit_config::network_type<true, input_rgb_image_sized<224>>>>;
     using feats = loss_multiclass_log<fc<1000, imagenet_vit_config::network_type<false, input_rgb_image_sized<224>>>>;
