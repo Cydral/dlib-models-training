@@ -937,12 +937,12 @@ int main(int argc, char** argv)
                 labels.push_back(full_tokens[start + max_seq_len]);
 
                 if (samples.size() % 10000 == 0) {
-                    cout << "Created " << samples.size() << " samples ("
-                        << (start * 100.0 / num_sequences) << "%)...\r";
+                    cout << "Created " << samples.size() << " training samples ("
+                        << (start * 100 / num_sequences) << "%)...\r";
                 }
             }
             full_tokens.clear();
-            cout << "\nCreated " << samples.size() << " training samples.\n";
+            cout << "Created " << samples.size() << " training samples (100%)...\n";
 
             // 5) Build and train the network
             using net_type = ernie_transformer::network_type<true>;
