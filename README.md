@@ -43,3 +43,26 @@ Comparative training of Vision Transformer (ViT) vs ResNet-34 on Stable ImageNet
 - Advanced evaluation:
   - Test-time augmentation (16 crops per image)
   - Both Top-1 and Top-5 accuracy metrics
+ 
+## `slm_advanced_train_ex.cpp`
+
+**Description**:  
+Advanced transformer language model with text reconstruction capabilities. Implements:
+
+- 🧠 Transformer architecture with Rotary Positional Embeddings (RoPE)
+- 🧩 Mixture-of-Experts (MoE) layers
+- 🔤 BPE tokenization with custom vocabulary
+
+**Key Features**:
+- Text memorization/reconstruction
+- Three operational modes:
+  - 🏋️ Training with RoPE-enhanced attention
+  - 🖨️ Autoregressive text generation
+  - 🔍 Byte-level verification
+- Memory-efficient training:
+  - Sliding window sequences
+  - Adaptive batch striding
+- Production-ready:
+  - Model checkpointing
+  - Token caching
+  - GPU acceleration
