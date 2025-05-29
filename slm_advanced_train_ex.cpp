@@ -438,9 +438,7 @@ namespace {
 // Utility function to get file size
 size_t get_file_size(const std::string& filepath) {
     std::ifstream file(filepath, std::ios::binary);
-    if (!file) {
-        return 0; // Return 0 if file doesn't exist or cannot be opened
-    }
+    if (!file) return 0;
     file.seekg(0, std::ios::end);
     size_t file_size = file.tellg();
     file.close();
@@ -452,9 +450,7 @@ std::string generate_tokens_filename(const std::string& input_file, size_t max_b
     // Extract base name from input file
     std::string base_name = input_file;
     size_t pos = base_name.find_last_of("/\\");
-    if (pos != std::string::npos) {
-        base_name = base_name.substr(pos + 1);
-    }
+    if (pos != std::string::npos) base_name = base_name.substr(pos + 1);
 
     // Create filename with size information
     std::string size_info = (max_bytes > 0) ? "partial" : "full";
@@ -514,7 +510,6 @@ std::string read_enwiki(const std::string& filepath, size_t max_bytes = 0) {
     if (!file) {
         throw std::runtime_error("Cannot open enwiki file: " + filepath);
     }
-
     size_t file_size = get_file_size(filepath);
 
     // If max_bytes is specified and valid, limit the reading
@@ -535,9 +530,7 @@ bool verify_match(const std::string& original, const std::string& generated) {
     }
 
     // Helper function to determine if a character is printable
-    auto is_printable = [](unsigned char c) {
-        return c >= 32 && c < 127;
-        };
+    auto is_printable = [](unsigned char c) { return c >= 32 && c < 127; };
 
     // Helper function to format a byte as string (either character or hex)
     auto format_byte = [&is_printable](unsigned char c) -> std::string {
@@ -549,7 +542,7 @@ bool verify_match(const std::string& original, const std::string& generated) {
             ss << "\\x" << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(c);
             return ss.str();
         }
-        };
+    };
 
     // Helper function to display context around a position
     auto show_context = [&](size_t pos, size_t context_size) {
@@ -577,7 +570,7 @@ bool verify_match(const std::string& original, const std::string& generated) {
             << "'): " << orig_context << "\n";
         cout << "Generated (" << (int)generated[pos] << " = '" << gen_highlight
             << "'): " << gen_context << "\n";
-        };
+    };
 
     size_t mismatch_count = 0;
     const size_t max_detailed_mismatches = 10;  // Maximum number of detailed errors to display
@@ -638,9 +631,8 @@ bool verify_match(const std::string& original, const std::string& generated) {
             cout << "  Region #" << (i + 1) << ": Position " << error_regions[i].first
                 << ", Length " << error_regions[i].second << "\n";
         }
-        if (error_regions.size() > 20) {
+        if (error_regions.size() > 20)
             cout << "  ... and " << (error_regions.size() - 20) << " more regions\n";
-        }
 
         // Report on most common error patterns
         cout << "\nMost common error patterns (original -> generated):\n";
@@ -1029,7 +1021,7 @@ int main(int argc, char** argv)
                 epoch++;
 
                 // Evaluate progress at end of epoch
-                cout << "completed epoch " << epoch << " - average loss: " << (total_loss / batches_seen) << endl;
+                cout << ">>> completed epoch " << epoch << " - average loss: " << (total_loss / batches_seen) << endl;
             }
 
             // Save model
@@ -1168,10 +1160,10 @@ int main(int argc, char** argv)
                 target_size = max_bytes;
             }
             else {
-                // Default: generate 1GB or original file size
+                // Default: generate 1K or original file size
                 target_size = get_file_size(enwiki_path);
                 if (target_size == 0) {
-                    target_size = 1000000000; // 1GB default
+                    target_size = 1024;
                 }
             }
             cout << "Will generate approximately " << target_size << " bytes\n";
