@@ -685,10 +685,10 @@ int main(int argc, char** argv)
         parser.add_option("alpha", "Set the weight decay for Adam (default: 0.004)", 1);
         parser.add_option("beta1", "Set Adam's first moment coefficient (default: 0.9)", 1);
         parser.add_option("beta2", "Set Adam's second moment coefficient (default: 0.999)", 1);
-        parser.add_option("model-file", "Path for model (default: enwiki_model.dat)", 1);
+        parser.add_option("model-file", "Path for model (default: ernie_model.dat)", 1);
         parser.add_option("output-file", "Path for output (default: enwiki_generated.txt)", 1);
         parser.add_option("prompt-tokens", "Number of tokens for initial prompt (default: seq-len)", 1);
-        parser.add_option("tokenizer", "Path to pre-trained tokenizer (default: enwiki_tokenizer.vocab)", 1);
+        parser.add_option("tokenizer", "Path to pre-trained tokenizer (default: ernie_tokenizer.vocab)", 1);
         parser.add_option("tokens-file", "Path to pre-tokenized tokens file (optional)", 1);
         parser.add_option("force-tokenize", "Force tokenization even if tokens file exists");
         parser.parse(argc, argv);
@@ -709,14 +709,14 @@ int main(int argc, char** argv)
         const double alpha = get_option(parser, "alpha", 0.004);
         const double beta1 = get_option(parser, "beta1", 0.9);
         const double beta2 = get_option(parser, "beta2", 0.999);
-        const std::string model_file = get_option(parser, "model-file", "enwiki_model.dat");
+        const std::string model_file = get_option(parser, "model-file", "ernie_model.dat");
         const std::string output_file = get_option(parser, "output-file", "enwiki_generated.txt");
         const std::string enwiki_path = get_option(parser, "enwiki", "enwiki");
         const long max_seq_len = 180;
         const long num_layers = 2;
         const long num_heads = 6;
         const long embedding_dim = 228;
-        const std::string tokenizer_path = get_option(parser, "tokenizer", "enwiki_tokenizer.vocab");
+        const std::string tokenizer_path = get_option(parser, "tokenizer", "ernie_tokenizer.vocab");
         // Default number of prompt tokens = input sequence length
         const long prompt_tokens = get_option(parser, "prompt-tokens", max_seq_len);
         const bool force_tokenize = parser.option("force-tokenize");
@@ -1194,7 +1194,8 @@ int main(int argc, char** argv)
             // Generate until target size is reached
             int start_of_text = tokenizer.get_special_token_id("<text>"),
                 end_of_text = tokenizer.get_special_token_id("</text>"), next_token = 0;
-            while (total_bytes < target_size && next_token != start_of_text && next_token != end_of_text) {
+            while (total_bytes < target_size && next_token != start_of_text && next_token != end_of_text
+                && !g_terminate_flag.load()) {
                 // Predict next token
                 next_token = net(input_seq);
                 token_buffer.push_back(next_token);
