@@ -674,6 +674,7 @@ int main(int argc, char** argv)
         command_line_parser parser;
         parser.add_option("train", "Train a transformer model on enwiki");
         parser.add_option("generate", "Generate enwiki from a previously trained model");
+        parser.add_option("prompt", "Prompt string for text generation", 1);
         parser.add_option("verify", "Verify generated output against original enwiki");
         parser.add_option("tokenize-only", "Only tokenize the input file and save tokens");
         parser.add_option("enwiki", "Path to the enwiki file", 1);
@@ -713,14 +714,14 @@ int main(int argc, char** argv)
         const std::string model_file = get_option(parser, "model-file", "ernie_model.dat");
         const std::string output_file = get_option(parser, "output-file", "enwiki_generated.txt");
         const std::string enwiki_path = get_option(parser, "enwiki", "enwiki");
-        const long max_seq_len = 180;
+        const long max_seq_len = 200;
         const long num_layers = 2;
         const long num_heads = 6;
         const long embedding_dim = 228;
         const std::string tokenizer_path = get_option(parser, "tokenizer", "ernie_tokenizer.vocab");
         // Default number of prompt tokens = input sequence length
         const bool force_tokenize = parser.option("force-tokenize");
-        const long num_tokens = 1000;
+        const long num_tokens = 3000;
 
         // Calculate max bytes to process
         size_t max_bytes = 0, max_tokens = 0;
@@ -968,8 +969,6 @@ int main(int argc, char** argv)
             auto start_time = std::chrono::steady_clock::now();
 
             // Shuffle indices for epoch
-            std::random_device rd;
-            std::mt19937 g(rd());
             std::vector<size_t> indices(samples.size());
             std::iota(indices.begin(), indices.end(), 0);
 
@@ -977,7 +976,7 @@ int main(int argc, char** argv)
                 && !g_terminate_flag.load())
             {
                 // Shuffle for new epoch
-                std::shuffle(indices.begin(), indices.end(), g);
+                std::shuffle(indices.begin(), indices.end(), std::default_random_engine{});
 
                 // Process mini-batches
                 for (size_t i = 0; i < samples.size() && !g_terminate_flag.load(); i += batch_size)
@@ -990,8 +989,9 @@ int main(int argc, char** argv)
                     batch_labels.reserve(batch_size);
 
                     for (size_t j = 0; j < batch_size; ++j) {
-                        batch_samples.push_back(samples[indices[i + j]]);
-                        batch_labels.push_back(labels[indices[i + j]]);
+                        size_t pos = (i + j) >= indices.size() ? j : (i + j);
+                        batch_samples.push_back(samples[indices[pos]]);
+                        batch_labels.push_back(labels[indices[pos]]);
                     }
 
                     // Train on this batch
@@ -1041,7 +1041,7 @@ int main(int argc, char** argv)
                 for (size_t i = 0; i < labels.size(); ++i)
                     if (predicted[i] == labels[i]) correct++;
                 double accuracy = (double)correct / labels.size();
-                cout << "Training accuracy: " << (accuracy * 100.0) << "%\n";
+                cout << "Training accuracy: " << fixed << setprecision(2) << (accuracy * 100.0) << "%\n";
 
                 // We need perfect accuracy to reconstruct enwiki
                 if (accuracy < 0.9999) {
@@ -1064,6 +1064,7 @@ int main(int argc, char** argv)
             if (file_exists(model_file)) {
                 deserialize(model_file) >> net;
                 cout << "Loaded model from " << model_file << "\n";
+                cout << "Number of model parameters: " << count_parameters(net) << endl;
             }
             else {
                 cerr << "Error: model file not found. Please run --train first.\n";
@@ -1075,76 +1076,93 @@ int main(int argc, char** argv)
                 cerr << "Error: Tokenizer not loaded. Please provide a valid tokenizer file.\n";
                 return 0;
             }
-
-            // 3) Read beginning of enwiki file for prompt
+            int text_start_id = tokenizer.get_special_token_id("<text>"),
+                text_end_id = tokenizer.get_special_token_id("</text>");
+            if (text_start_id < 0 || text_end_id < 0)
+                cout << "Warning: Special tokens not found in tokenizer vocabulary.\n";
+            
             std::vector<int> prompt_tokens;
+            const std::string prompt_str = get_option(parser, "prompt", "");
+            bool user_prompt = !prompt_str.empty();
+            if (user_prompt) {
+                cout << "Using user-provided prompt: \"" << prompt_str << "\"\n";
+                prompt_tokens.clear();
+                prompt_tokens.push_back(text_start_id);
+                auto encoded_tokens = tokenizer.encode_raw(prompt_str);
+                prompt_tokens.insert(prompt_tokens.end(), encoded_tokens.begin(), encoded_tokens.end());
+                cout << prompt_tokens.size() << " tokens loaded for prompt...\n";
+            }
+            else { // 3) Read beginning of enwiki file for prompt
+                // Check if we have pre-tokenized tokens
+                if (file_exists(tokens_file)) {
+                    cout << "Found pre-tokenized tokens file: " << tokens_file << endl;
+                    cout << "Loading tokens for prompt...\n";
 
-            // Check if we have pre-tokenized tokens
-            if (file_exists(tokens_file)) {
-                cout << "Found pre-tokenized tokens file: " << tokens_file << endl;
-                cout << "Loading tokens for prompt...\n";
+                    // We only need max_seq_len tokens, so we can load
+                    // just the necessary part of the file
+                    std::ifstream file(tokens_file, std::ios::binary);
+                    if (!file) {
+                        cerr << "Failed to open tokens file: " << tokens_file << endl;
+                    }
+                    else {
+                        // Read total number of tokens
+                        uint64_t num_tokens;
+                        file.read(reinterpret_cast<char*>(&num_tokens), sizeof(num_tokens));
 
-                // We only need max_seq_len tokens, so we can load
-                // just the necessary part of the file
-                std::ifstream file(tokens_file, std::ios::binary);
-                if (!file) {
-                    cerr << "Failed to open tokens file: " << tokens_file << endl;
+                        // Read only the first max_seq_len tokens
+                        size_t tokens_to_read = std::min(static_cast<size_t>(max_seq_len), static_cast<size_t>(num_tokens));
+                        prompt_tokens.resize(tokens_to_read);
+
+                        for (size_t i = 0; i < tokens_to_read; ++i) {
+                            uint32_t t;
+                            file.read(reinterpret_cast<char*>(&t), sizeof(t));
+                            prompt_tokens[i] = static_cast<int>(t);
+                        }
+
+                        cout << "Loaded " << prompt_tokens.size() << " tokens for prompt from file.\n";
+                    }
                 }
-                else {
-                    // Read total number of tokens
-                    uint64_t num_tokens;
-                    file.read(reinterpret_cast<char*>(&num_tokens), sizeof(num_tokens));
 
-                    // Read only the first max_seq_len tokens
-                    size_t tokens_to_read = std::min(static_cast<size_t>(max_seq_len), static_cast<size_t>(num_tokens));
-                    prompt_tokens.resize(tokens_to_read);
+                // If we couldn't load tokens, tokenize the prompt text
+                if (prompt_tokens.empty()) {
+                    cout << "Reading initial prompt from enwiki...\n";
+                    std::string enwiki_prompt;
 
-                    for (size_t i = 0; i < tokens_to_read; ++i) {
-                        uint32_t t;
-                        file.read(reinterpret_cast<char*>(&t), sizeof(t));
-                        prompt_tokens[i] = static_cast<int>(t);
+                    if (file_exists(enwiki_path)) {
+                        // Read a portion large enough to cover the first tokens
+                        std::ifstream file(enwiki_path, std::ios::binary);
+                        // Buffer intentionally large to ensure we have enough text for tokens
+                        char buffer[max_seq_len * 10];
+                        file.read(buffer, sizeof(buffer));
+                        size_t bytes_read = file.gcount();
+                        enwiki_prompt = std::string(buffer, bytes_read);
+                    }
+                    else {
+                        cerr << "Error: Cannot find original enwiki file for initial prompt.\n";
+                        return 0;
                     }
 
-                    cout << "Loaded " << prompt_tokens.size() << " tokens for prompt from file.\n";
+                    // Tokenize the prompt
+                    cout << "Tokenizing prompt...\n";
+                    prompt_tokens.clear();
+                    prompt_tokens.push_back(text_start_id);
+                    auto encoded_tokens = tokenizer.encode_raw(enwiki_prompt);
+                    prompt_tokens.insert(prompt_tokens.end(), encoded_tokens.begin(), encoded_tokens.end());
                 }
-            }
-
-            // If we couldn't load tokens, tokenize the prompt text
-            if (prompt_tokens.empty()) {
-                cout << "Reading initial prompt from enwiki...\n";
-                std::string enwiki_prompt;
-
-                if (file_exists(enwiki_path)) {
-                    // Read a portion large enough to cover the first tokens
-                    std::ifstream file(enwiki_path, std::ios::binary);
-                    // Buffer intentionally large to ensure we have enough text for tokens
-                    char buffer[max_seq_len * 10];
-                    file.read(buffer, sizeof(buffer));
-                    size_t bytes_read = file.gcount();
-                    enwiki_prompt = std::string(buffer, bytes_read);
-                }
-                else {
-                    cerr << "Error: Cannot find original enwiki file for initial prompt.\n";
-                    return 0;
-                }
-
-                // Tokenize the prompt
-                cout << "Tokenizing prompt...\n";
-                int text_start_id = tokenizer.get_special_token_id("<text>");
-                prompt_tokens.clear();                
-                prompt_tokens.push_back(text_start_id);
-                auto encoded_tokens = tokenizer.encode_raw(enwiki_prompt);
-                prompt_tokens.insert(prompt_tokens.end(), encoded_tokens.begin(), encoded_tokens.end());
             }
 
             // Limit to requested number of tokens (exact, no padding)
             if (prompt_tokens.size() > (size_t)max_seq_len) {
                 prompt_tokens.resize(max_seq_len);
+                cout << "Prompt truncated to " << max_seq_len << " tokens.\n";
             }
             else if (prompt_tokens.size() < (size_t)max_seq_len) {
-                cerr << "Warning: Not enough tokens in prompt. Got " << prompt_tokens.size()
-                    << ", needed " << max_seq_len << ". Consider using a larger input file.\n";
-                return 0;
+                cout << "Warning: Not enough tokens in prompt. Got " << prompt_tokens.size()
+                    << ", needed " << max_seq_len << ".\n";
+                int pad_token_id = tokenizer.get_special_token_id("<pad>");
+                size_t pad_count = max_seq_len - prompt_tokens.size();
+                cout << "Padding prompt with " << pad_count << " pad tokens (id=" << pad_token_id << ").\n";
+                prompt_tokens.insert(prompt_tokens.begin(), pad_count, pad_token_id);
             }
             cout << "Using " << prompt_tokens.size() << " tokens for initial prompt\n";
 
@@ -1190,16 +1208,20 @@ int main(int argc, char** argv)
             auto start_time = std::chrono::high_resolution_clock::now();
             size_t total_bytes = initial_text.size();
             size_t token_count = prompt_tokens.size();
+            size_t tokens_generated = 0;
+            bool stop_generation = false;
 
             // Generate until target size is reached
             int start_of_text = tokenizer.get_special_token_id("<text>"),
                 end_of_text = tokenizer.get_special_token_id("</text>"), next_token = 0;
-            while (total_bytes < target_size && next_token != start_of_text && next_token != end_of_text
+            while (!stop_generation && total_bytes < target_size
+                && next_token != start_of_text && next_token != end_of_text
                 && !g_terminate_flag.load()) {
                 // Predict next token
                 next_token = net(input_seq);
                 token_buffer.push_back(next_token);
                 token_count++;
+                tokens_generated++;
 
                 // Shift the input window
                 for (long i = 0; i < max_seq_len - 1; ++i)
@@ -1228,6 +1250,21 @@ int main(int argc, char** argv)
                         << " seconds\r";
                 }
                 if (max_tokens > 0 && token_count >= max_tokens) break;
+                if (user_prompt) {
+                    if (tokens_generated >= 500) {
+                        cout << "\nStopping: Generated 500 tokens\n";
+                        stop_generation = true;
+                    }                    
+                    else {
+                        // Check for '.' in decoded token
+                        std::vector<int> current_token{ next_token };
+                        std::string decoded_token = tokenizer.decode(current_token, false);
+                        if (decoded_token.find('.') != std::string::npos) {
+                            cout << "\nStopping: '.' detected in generated text\n";
+                            stop_generation = true;
+                        }
+                    }
+                }
             }
 
             // Flush remaining buffer
