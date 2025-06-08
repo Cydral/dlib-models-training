@@ -945,6 +945,54 @@ size_t count_unique_tokens(const std::vector<int>& tokens) {
 }
 
 // ----------------------------------------------------------------------------------------
+void augment_training_data(std::vector<matrix<int, 0, 1>>& samples, std::vector<unsigned long>& labels,
+    int unk_token, int pad_token, long max_seq_len) {
+    if (samples.empty()) return;
+
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<size_t> sample_dist(0, samples.size() - 1);
+    std::uniform_int_distribution<long> pos_dist(0, max_seq_len - 1);
+    std::uniform_int_distribution<long> unk_count_dist(2, 7);
+    std::uniform_real_distribution<float> pad_percent_dist(0.3f, 0.6f);
+
+    const size_t original_size = samples.size();
+
+    const size_t unk_count = original_size * 0.07;
+    for (size_t i = 0; i < unk_count; ++i) {
+        size_t idx = sample_dist(gen);
+        if (samples[idx].size() != max_seq_len) continue;
+        matrix<int, 0, 1> new_sample = samples[idx];
+
+        long replace_count = unk_count_dist(gen);
+        for (long j = 0; j < replace_count; ++j) {
+            long pos = pos_dist(gen);
+            new_sample(pos, 0) = unk_token;
+        }
+
+        samples.push_back(new_sample);
+        labels.push_back(labels[idx]);
+    }
+
+    const size_t pad_count = original_size * 0.05;
+    for (size_t i = 0; i < pad_count; ++i) {
+        size_t idx = sample_dist(gen);
+        if (samples[idx].size() != max_seq_len) continue;
+        matrix<int, 0, 1> new_sample = samples[idx];
+
+        float pad_percent = pad_percent_dist(gen);
+        long pad_start = max_seq_len * (1.0f - pad_percent);
+        pad_start = std::max(0L, std::min(max_seq_len - 1, pad_start));
+
+        unsigned long new_label = new_sample(pad_start, 0);
+        for (long j = pad_start; j < max_seq_len; ++j) new_sample(j, 0) = pad_token;
+
+        samples.push_back(new_sample);
+        labels.push_back(new_label);
+    }
+}
+
+// ----------------------------------------------------------------------------------------
 int main(int argc, char** argv)
 {   
     try
@@ -1225,6 +1273,10 @@ int main(int argc, char** argv)
             }
             full_tokens.clear();
             cout << "Created " << samples.size() << " training samples (100%)...\n";
+            int unk_token = tokenizer.get_special_token_id("<unk>"),
+                pad_token = tokenizer.get_special_token_id("<pad>");
+            augment_training_data(samples, labels, unk_token, pad_token, max_seq_len);
+            cout << "Total training samples after augmentation: " << samples.size() << endl;
 
             // 5) Build and train the network
             using net_type = enwiki_transformer::network_type<true>;
