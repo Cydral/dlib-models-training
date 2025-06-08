@@ -42,6 +42,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <map>
 #include <algorithm>
 #include <cmath>
 #include <random>
@@ -440,6 +441,7 @@ namespace dlib
             
             for (size_t i = 0; i < top_n; ++i) {            
                 const size_t eidx = indices[i];
+                //cout << "backward - selected expert: " << eidx << endl;
                 resizable_tensor adjusted_gradient = gradient_input;
                 if (aux_loss > 0)
                     tt::add(1, adjusted_gradient, aux_loss, experts[eidx].get_output());
@@ -935,6 +937,14 @@ bool verify_match(const std::string& original, const std::string& generated) {
 }
 
 // ----------------------------------------------------------------------------------------
+size_t count_unique_tokens(const std::vector<int>& tokens) {
+    if (tokens.empty()) return 0;
+    std::unordered_set<int> unique_tokens;
+    unique_tokens.insert(tokens.begin(), tokens.end());
+    return unique_tokens.size();
+}
+
+// ----------------------------------------------------------------------------------------
 int main(int argc, char** argv)
 {   
     try
@@ -953,7 +963,7 @@ int main(int argc, char** argv)
         parser.add_option("max-bytes", "Maximum number of bytes to process from enwiki", 1);
         parser.add_option("percent", "Percentage of enwiki to process (0-100)", 1);
         parser.add_option("learning-rate", "Set the learning rate (default: 1e-4)", 1);
-        parser.add_option("batch-size", "Set the mini-batch size (default: 64)", 1);
+        parser.add_option("batch-size", "Set the mini-batch size (default: 32)", 1);
         parser.add_option("patience", "Iterations without progress before early stopping (default: 15000)", 1);
         parser.add_option("max-epochs", "Maximum number of training epochs (default: 10)", 1);
         parser.add_option("alpha", "Set the weight decay for Adam (default: 0.004)", 1);
@@ -976,7 +986,7 @@ int main(int argc, char** argv)
 
         // Default values
         const double learning_rate = get_option(parser, "learning-rate", 1e-4);
-        const size_t batch_size = get_option(parser, "batch-size", 64);
+        const size_t batch_size = get_option(parser, "batch-size", 32);
         const long patience = get_option(parser, "patience", 15000);
         const size_t max_epochs = get_option(parser, "max-epochs", 10);
         const double alpha = get_option(parser, "alpha", 0.004);
@@ -988,11 +998,11 @@ int main(int argc, char** argv)
         const long max_seq_len = 200;
         const long num_layers = 2;
         const long num_heads = 6;
-        const long embedding_dim = 228;
+        const long embedding_dim = 456;
         const std::string tokenizer_path = get_option(parser, "tokenizer", "enwiki_tokenizer.vocab");
         // Default number of prompt tokens = input sequence length
         const bool force_tokenize = parser.option("force-tokenize");
-        const long num_tokens = 3000;
+        const long num_tokens = 5000;
 
         // Calculate max bytes to process
         size_t max_bytes = 0, max_tokens = 0;
@@ -1078,6 +1088,7 @@ int main(int argc, char** argv)
 
             cout << "Tokenization completed in " << tokenize_time << " seconds.\n";
             cout << "Number of tokens: " << full_tokens.size() << endl;
+            cout << "Total unique tokens: " << count_unique_tokens(full_tokens) << endl;
 
             // 4) Save tokens
             cout << "Saving tokens to file: " << tokens_file << endl;
@@ -1165,6 +1176,7 @@ int main(int argc, char** argv)
                     cerr << "Warning: Failed to save tokens for future use.\n";
                 }
             }
+            cout << "Total unique tokens: " << count_unique_tokens(full_tokens) << endl;
 
             // 4) Prepare training sequences (sliding window)
             cout << "Preparing training sequences...\n";
@@ -1297,8 +1309,8 @@ int main(int argc, char** argv)
 
             // Save model
             net.clean();
-            serialize(model_file) << net << tokenizer;
-            cout << "Model and tokenizer saved to " << model_file << "\n";
+            serialize(model_file) << net;
+            cout << "Model saved to " << model_file << "\n";
             std::remove("enwiki_trainer.sync");
             std::remove("enwiki_trainer.sync_");
 
@@ -1333,10 +1345,9 @@ int main(int argc, char** argv)
 
             // 1) Load the model
             using net_infer = enwiki_transformer::network_type<false>;
-            net_infer net;
-            bpe_tokenizer tokenizer;
+            net_infer net;            
             if (file_exists(model_file)) {
-                deserialize(model_file) >> net >> tokenizer;
+                deserialize(model_file) >> net;
                 cout << "Loaded model from " << model_file << "\n";
                 cout << "Number of model parameters: " << count_parameters(net) << endl;
             }
@@ -1346,7 +1357,13 @@ int main(int argc, char** argv)
             }
 
             // 2) Check that tokenizer is loaded
-            if (tokenizer.get_vocab_size() == 0) {
+            bpe_tokenizer tokenizer;
+            if (file_exists(tokenizer_path)) {
+                cout << "Loading pre-trained tokenizer from: " << tokenizer_path << endl;
+                deserialize(tokenizer_path) >> tokenizer;
+                cout << "Tokenizer loaded successfully with vocabulary size: " << tokenizer.get_vocab_size() << endl;
+            }
+            else {
                 cerr << "Error: Tokenizer not loaded. Please provide a valid tokenizer file.\n";
                 return 0;
             }
