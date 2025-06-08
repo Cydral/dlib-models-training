@@ -1279,8 +1279,10 @@ int main(int argc, char** argv)
                         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
                         double avg_loss = total_loss / batches_seen;
                         double samples_per_sec = samples_seen / (elapsed > 0 ? elapsed : 1);
+                        size_t epoch_progress = static_cast<size_t>((i * 100.0) / samples.size());
 
                         cout << "epoch#: " << (epoch + 1) << "/" << max_epochs
+                            << " (" << epoch_progress << "%)"
                             << " \t batch: " << batches_seen
                             << " \t samples: " << samples_seen
                             << " \t loss: " << avg_loss
