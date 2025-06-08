@@ -66,3 +66,29 @@ Advanced transformer language model with text reconstruction capabilities. Imple
   - Model checkpointing
   - Token caching
   - GPU acceleration
+ 
+## `slm_advanced_train_ex2.cpp`
+
+**Description**:
+Transformer language model featuring dynamic network-in-layer architecture for Mixture-of-Experts (MoE) implementation.
+
+**Core Components**:
+Core components:
+- Transformer backbone with Rotary Positional Embeddings
+- True MoE implementation (experts as subnetworks)
+- Dynamic routing (top-k experts per token)
+
+**Key Features**:
+- 🏗️ Layer-as-network design:
+  - Each expert is a complete feed-forward subnetwork
+  - Gating network controls expert selection
+  - Native backpropagation through routing
+- 🏋️ Training modes:
+  * Expert balancing via auxiliary loss
+  * Noise injection during training
+  * Usage-based expert selection
+
+**Operational Modes**:
+1. --train : Full MoE training
+2. --generate : Expert-conditional text generation
+3. --verify : Reconstruction validation
