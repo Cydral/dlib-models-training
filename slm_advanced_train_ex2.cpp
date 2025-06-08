@@ -440,7 +440,6 @@ namespace dlib
             
             for (size_t i = 0; i < top_n; ++i) {            
                 const size_t eidx = indices[i];
-                //cout << "backward - selected expert: " << eidx << endl;
                 resizable_tensor adjusted_gradient = gradient_input;
                 if (aux_loss > 0)
                     tt::add(1, adjusted_gradient, aux_loss, experts[eidx].get_output());
@@ -499,17 +498,17 @@ namespace dlib
             deserialize(item.experts, in);
         }
 
-        friend std::ostream& operator<<(std::ostream& out, const moe_& l)
+        friend std::ostream& operator<<(std::ostream& out, const moe_& item)
         {
-            out << "moe_layer (num_experts=" << l.n_experts << ")";
+            out << "moe (num_experts=" << item.n_experts << ")";
             return out;
         }
 
-        friend void to_xml(const moe_& l, std::ostream& out)
+        friend void to_xml(const moe_& item, std::ostream& out)
         {
-            out << "<moe_layer>\n";
-            out << "<num_experts>" << l.n_experts << "</num_experts>\n";
-            out << "</moe_layer>\n";
+            out << "<moe>\n";
+            out << "<num_experts>" << item.n_experts << "</num_experts>\n";
+            out << "</moe>\n";
         }
 
     private:
