@@ -231,6 +231,78 @@ namespace dlib
     // Helper to easily add RoPE to a network
     template <typename SUBNET>
     using rope = add_layer<rotary_positional_embedding_, SUBNET>;
+    
+    /*constexpr long PAD_TOK_VAL = 283;
+    template <long pad_tok, template<typename> class tag>
+    class padding_mask_ {
+    public:
+        explicit padding_mask_() = default;
+        padding_mask_(const padding_mask_& other) {}
+
+        template <typename SUBNET>
+        void setup(const SUBNET& sub) {}       
+
+        template <typename SUBNET>
+        void forward(const SUBNET& sub, resizable_tensor& output) {
+            auto& prev = sub.get_output();
+            auto& tokens = layer<tag>(sub).get_output();
+            output.copy_size(prev);
+
+            tt::copy_tensor(false, output, 0, prev, 0, prev.k());
+
+            for (long s = 0; s < prev.num_samples(); ++s) {
+                for (long k = 0; k < prev.k(); ++k) {
+                    for (long r = 0; r < prev.nr(); ++r) {
+                        if (tokens.host()[tensor_index(tokens, s, 0, r, 0)] == pad_tok) {
+                            for (long c = 0; c < prev.nc(); ++c) {
+                                output.host()[tensor_index(output, s, k, r, c)] =
+                                    -std::numeric_limits<float>::infinity();
+                            }
+                        }                        
+                    }
+                }
+            }
+        }
+
+        template <typename SUBNET>
+        void backward(const tensor& gradient_input, SUBNET& sub, tensor& params_grad) {
+            auto& prev = sub.get_gradient_input();
+            tt::copy_tensor(true, prev, 0, gradient_input, 0, prev.k());
+        }       
+
+        padding_mask_& operator=(const padding_mask_& other) { return *this; }
+
+        const tensor& get_layer_params() const { return params; }
+        tensor& get_layer_params() { return params; }
+
+        friend void serialize(const padding_mask_& item, std::ostream& out) {
+            std::string version = "padding_mask_";
+            dlib::serialize(version, out);
+        }
+
+        friend void deserialize(padding_mask_& item, std::istream& in) {
+            std::string version;
+            dlib::deserialize(version, in);
+            if (version != "padding_mask_")
+                throw serialization_error("Unexpected version found while deserializing padding_mask_.");
+        }
+
+        friend std::ostream& operator<<(std::ostream& out, const padding_mask_& item) {
+            out << "padding_mask";
+            return out;
+        }
+
+        friend void to_xml(const padding_mask_& item, std::ostream& out)
+        {
+            out << "<padding_mask/>\n";
+        }
+
+    private:
+        resizable_tensor params;    // Empty tensor (no learnable parameters)
+    };
+
+    template <long pad_tok, template<typename> class tag, typename SUBNET>
+    using padding_mask = add_layer<padding_mask_<pad_tok, tag>, SUBNET>;*/
 
     template <long d_k_>
     class scale_weights_ : public multiply_ {
@@ -277,9 +349,9 @@ namespace dlib
         
     template <long num_experts, template <typename> class DO, typename SUBNET>
     using gate = softmax<fc<num_experts, avg_pool_everything<
-        DO<leaky_relu<fc<16, 
         DO<leaky_relu<fc<32, 
-        DO<fc<16, SUBNET>>>>>>>>>>>;
+        DO<leaky_relu<fc<64, 
+        DO<fc<32, SUBNET>>>>>>>>>>>;
 
     namespace layer_test {
         template <template <typename> class DO>
@@ -560,10 +632,10 @@ namespace dlib
     
     // Complete MoE feed-forward layer
     template <template <typename> class ACT, template <typename> class DO,
-        long d_model, typename SUBNET>
+        long d_model, long num_experts, typename SUBNET>
     using moe_feed_forward = rms_norm<add_prev5<
         moe<d_model, ACT, DO, tag6, skip5<
-        tag6<gate<4, DO, tag5<SUBNET>>>>>>>;
+        tag6<gate<num_experts, DO, tag5<SUBNET>>>>>>>;
 
     /*!
         This defines a standard transformer encoder block with self-attention
@@ -577,14 +649,14 @@ namespace dlib
             - num_heads: Number of attention heads
     !*/
     template <template <typename> class ACT, template <typename> class DO,
-        long seq_len, long d_model, long num_heads, typename SUBNET>
+        long seq_len, long d_model, long num_heads, long num_experts, typename SUBNET>
     using transformer_block =
-        moe_feed_forward<ACT, DO, d_model,
+        moe_feed_forward<ACT, DO, d_model, num_experts,
         multihead_attention<ACT, DO, seq_len, d_model, num_heads, SUBNET>>;
 
     // Positional Embeddings
     template <long num_embeddings, long embedding_length, typename SUBNET>
-    using positional_embeddings = layer_norm<positional_encodings<embeddings<num_embeddings, embedding_length, SUBNET>>>;
+    using positional_embeddings = layer_norm<positional_encodings<embeddings<num_embeddings, embedding_length, tag10<SUBNET>>>>;
 
     // Classification Head   
     template <template <typename> class ACT, long num_logits, long embedding_length, typename SUBNET>
@@ -606,11 +678,12 @@ namespace dlib
      * @param dropout_policy Dropout regularization policy
      */
     template <
-        long vocab_size = 5000,                                 // Default vocabulary size
+        long vocab_size = 50000,                                // Default vocabulary size
         long num_layers = 6,                                    // Default number of layers
         long num_heads = 8,                                     // Default number of attention heads
-        long embedding_dim = 128,                               // Default embedding dimension
+        long embedding_dim = 256,                               // Default embedding dimension
         long max_seq_len = 300,                                 // Default maximum sequence length
+        long num_experts = 10,                                  // Default number of experts
         template <typename> class activation_func = gelu,       // Default activation function
         template <typename> class dropout_policy = dropout_10   // Default dropout policy
     >
@@ -621,6 +694,7 @@ namespace dlib
         static constexpr long NUM_HEADS = num_heads;
         static constexpr long EMBEDDING_DIM = embedding_dim;
         static constexpr long MAX_SEQ_LEN = max_seq_len;
+        static constexpr long NUM_EXPERTS = num_experts;
 
         /**
          * @brief Compile-time validation of model configuration
@@ -632,6 +706,7 @@ namespace dlib
             static_assert(NUM_LAYERS > 0, "Number of layers must be positive");
             static_assert(NUM_HEADS > 0, "Number of attention heads must be positive");
             static_assert(EMBEDDING_DIM% NUM_HEADS == 0, "Embedding dimension must be divisible by number of heads");
+            static_assert(NUM_EXPERTS > 0, "Number of experts must be positive");
         };
 
         // Network component definitions
@@ -642,11 +717,11 @@ namespace dlib
 
         template <typename SUBNET>
         using t_transformer_block =
-            transformer_block<activation_func, dropout_policy, MAX_SEQ_LEN, EMBEDDING_DIM, NUM_HEADS, SUBNET>;
+            transformer_block<activation_func, dropout_policy, MAX_SEQ_LEN, EMBEDDING_DIM, NUM_HEADS, NUM_EXPERTS, SUBNET>;
 
         template <typename SUBNET>
         using i_transformer_block =
-            transformer_block<activation_func, multiply, MAX_SEQ_LEN, EMBEDDING_DIM, NUM_HEADS, SUBNET>;
+            transformer_block<activation_func, multiply, MAX_SEQ_LEN, EMBEDDING_DIM, NUM_HEADS, NUM_EXPERTS, SUBNET>;
 
         template<bool is_training>
         using network_type = std::conditional_t<is_training,
@@ -665,7 +740,8 @@ namespace dlib
                     << "- layers: " << NUM_LAYERS << "\n"
                     << "- attention heads: " << NUM_HEADS << "\n"
                     << "- embedding dimension: " << EMBEDDING_DIM << "\n"
-                    << "- sequence length: " << MAX_SEQ_LEN;
+                    << "- sequence length: " << MAX_SEQ_LEN << "\n"
+                    << "- experts: " << NUM_EXPERTS;
                 return ss.str();
             }
         };
@@ -947,23 +1023,23 @@ size_t count_unique_tokens(const std::vector<int>& tokens) {
 // ----------------------------------------------------------------------------------------
 void augment_training_data(std::vector<matrix<int, 0, 1>>& samples, std::vector<unsigned long>& labels,
     int unk_token, int pad_token, long max_seq_len) {
-    if (samples.empty()) return;
+    if (samples.empty() || samples.size() != labels.size() || samples[0].size() != max_seq_len) return;
 
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_int_distribution<size_t> sample_dist(0, samples.size() - 1);
     std::uniform_int_distribution<long> pos_dist(0, max_seq_len - 1);
-    std::uniform_int_distribution<long> unk_count_dist(2, 7);
-    std::uniform_real_distribution<float> pad_percent_dist(0.3f, 0.6f);
+    std::uniform_int_distribution<long> unk_count_dist(max_seq_len * 0.02, max_seq_len * 0.08);
+    std::uniform_real_distribution<double> pad_percent_dist(0.3, 0.6);
 
     const size_t original_size = samples.size();
 
-    const size_t unk_count = original_size * 0.07;
+    const size_t unk_count = original_size * 0.05;
     for (size_t i = 0; i < unk_count; ++i) {
         size_t idx = sample_dist(gen);
-        if (samples[idx].size() != max_seq_len) continue;
         matrix<int, 0, 1> new_sample = samples[idx];
 
+        unsigned long new_label = labels[idx];
         long replace_count = unk_count_dist(gen);
         for (long j = 0; j < replace_count; ++j) {
             long pos = pos_dist(gen);
@@ -971,17 +1047,16 @@ void augment_training_data(std::vector<matrix<int, 0, 1>>& samples, std::vector<
         }
 
         samples.push_back(new_sample);
-        labels.push_back(labels[idx]);
+        labels.push_back(new_label);
     }
 
-    const size_t pad_count = original_size * 0.05;
+    /*const size_t pad_count = original_size * 0.05;
     for (size_t i = 0; i < pad_count; ++i) {
         size_t idx = sample_dist(gen);
-        if (samples[idx].size() != max_seq_len) continue;
         matrix<int, 0, 1> new_sample = samples[idx];
 
-        float pad_percent = pad_percent_dist(gen);
-        long pad_start = max_seq_len * (1.0f - pad_percent);
+        double pad_percent = pad_percent_dist(gen);
+        long pad_start = max_seq_len * (1.0 - pad_percent);
         pad_start = std::max(0L, std::min(max_seq_len - 1, pad_start));
 
         unsigned long new_label = new_sample(pad_start, 0);
@@ -989,12 +1064,22 @@ void augment_training_data(std::vector<matrix<int, 0, 1>>& samples, std::vector<
 
         samples.push_back(new_sample);
         labels.push_back(new_label);
-    }
+    }*/
 }
 
 // ----------------------------------------------------------------------------------------
 int main(int argc, char** argv)
-{   
+{
+    {
+        /*TinyGPT::Encoder encoder = TinyGPT::Encoder::getEncoder("./gpt2");
+        auto tokens = encoder.encode("Ceci est un test !");
+        cout << "Tokens IDs: ";
+        for (auto tok : tokens) cout << tok << " | ";
+        cout << endl;
+        auto outputText = encoder.decode(tokens);
+        cout << "Decoded: " << outputText << endl;
+        return 0;*/
+    }
     try
     {
         // Setup interrupt handling for clean termination
@@ -1011,9 +1096,9 @@ int main(int argc, char** argv)
         parser.add_option("max-bytes", "Maximum number of bytes to process from enwiki", 1);
         parser.add_option("percent", "Percentage of enwiki to process (0-100)", 1);
         parser.add_option("learning-rate", "Set the learning rate (default: 1e-4)", 1);
-        parser.add_option("batch-size", "Set the mini-batch size (default: 32)", 1);
+        parser.add_option("batch-size", "Set the mini-batch size (default: 64)", 1);
         parser.add_option("patience", "Iterations without progress before early stopping (default: 15000)", 1);
-        parser.add_option("max-epochs", "Maximum number of training epochs (default: 10)", 1);
+        parser.add_option("max-epochs", "Maximum number of training epochs (default: 50)", 1);
         parser.add_option("alpha", "Set the weight decay for Adam (default: 0.004)", 1);
         parser.add_option("beta1", "Set Adam's first moment coefficient (default: 0.9)", 1);
         parser.add_option("beta2", "Set Adam's second moment coefficient (default: 0.999)", 1);
@@ -1034,23 +1119,24 @@ int main(int argc, char** argv)
 
         // Default values
         const double learning_rate = get_option(parser, "learning-rate", 1e-4);
-        const size_t batch_size = get_option(parser, "batch-size", 32);
+        const size_t batch_size = get_option(parser, "batch-size", 64);
         const long patience = get_option(parser, "patience", 15000);
-        const size_t max_epochs = get_option(parser, "max-epochs", 10);
+        const size_t max_epochs = get_option(parser, "max-epochs", 50);
         const double alpha = get_option(parser, "alpha", 0.004);
         const double beta1 = get_option(parser, "beta1", 0.9);
         const double beta2 = get_option(parser, "beta2", 0.999);
         const std::string model_file = get_option(parser, "model-file", "slm_enwiki_model.dat");
         const std::string output_file = get_option(parser, "output-file", "enwiki_generated.txt");
         const std::string enwiki_path = get_option(parser, "enwiki", "enwiki");
-        const long max_seq_len = 200;
+        const long max_seq_len = 180;
         const long num_layers = 2;
         const long num_heads = 6;
-        const long embedding_dim = 456;
+        const long embedding_dim = 228;
+        const long num_experts = 5;
         const std::string tokenizer_path = get_option(parser, "tokenizer", "enwiki_tokenizer.vocab");
         // Default number of prompt tokens = input sequence length
         const bool force_tokenize = parser.option("force-tokenize");
-        const long num_tokens = 5000;
+        const long num_tokens = 50000;
 
         // Calculate max bytes to process
         size_t max_bytes = 0, max_tokens = 0;
@@ -1081,7 +1167,8 @@ int main(int argc, char** argv)
             num_layers,     // number of layers
             num_heads,      // number of attention heads
             embedding_dim,  // embedding dimension
-            max_seq_len     // maximum sequence length
+            max_seq_len,    // maximum sequence length
+            num_experts     // number of experts
         >;
 
         // For GPU usage (if available)
@@ -1109,7 +1196,7 @@ int main(int argc, char** argv)
             bpe_tokenizer tokenizer;
             if (!file_exists(tokenizer_path)) {
                 cout << "Training new BPE tokenizer with vocabulary size " << num_tokens << "...\n";
-                tokenizer.train(enwiki_text, num_tokens, true);
+                tokenizer.train(enwiki_text, num_tokens, 100 * 1e6, true);
                 serialize(tokenizer_path) << tokenizer;
                 cout << "Tokenizer saved to " << tokenizer_path << endl;
             }
@@ -1128,7 +1215,7 @@ int main(int argc, char** argv)
                 cout << "Warning: Special tokens not found in tokenizer vocabulary.\n";
             full_tokens.clear();
             full_tokens.push_back(text_start_id);
-            auto encoded_tokens = tokenizer.encode_raw(enwiki_text);
+            auto encoded_tokens = tokenizer.encode(enwiki_text);
             full_tokens.insert(full_tokens.end(), encoded_tokens.begin(), encoded_tokens.end());
             full_tokens.push_back(text_end_id);
             auto end_time = std::chrono::high_resolution_clock::now();
@@ -1157,8 +1244,28 @@ int main(int argc, char** argv)
         {
             cout << "=== TRAINING MODE ===\n";
 
-            // Check if we should load pre-tokenized tokens
+            // Read the enwiki file (or portion)
+            cout << "Reading enwiki file from: " << enwiki_path;
+            if (max_bytes > 0) cout << " (limited to " << max_bytes << " bytes)";
+            cout << endl;
+            std::string enwiki_text = read_enwiki(enwiki_path, max_bytes);
+            cout << "Read " << enwiki_text.size() << " bytes\n";
+
+            // Train a new tokenizer if needed
             bpe_tokenizer tokenizer;
+            if (!file_exists(tokenizer_path)) {
+                cout << "Training new BPE tokenizer with vocabulary size " << num_tokens << "...\n";
+                tokenizer.train(enwiki_text, num_tokens, 100 * 1e6, true);
+                serialize(tokenizer_path) << tokenizer;
+                cout << "Tokenizer saved to " << tokenizer_path << endl;
+            }
+            else {
+                cout << "Loading pre-trained tokenizer from: " << tokenizer_path << endl;
+                deserialize(tokenizer_path) >> tokenizer;
+                cout << "Tokenizer loaded successfully with vocabulary size: " << tokenizer.get_vocab_size() << endl;
+            }
+
+            // Check if we should load pre-tokenized tokens            
             if (!force_tokenize && file_exists(tokens_file)) {
                 cout << "Found pre-tokenized tokens file: " << tokens_file << endl;
                 cout << "Loading tokens from file...\n";
@@ -1176,28 +1283,7 @@ int main(int argc, char** argv)
             }
 
             if (!tokens_loaded) {
-                // 1) Read the enwiki file (or portion)
-                cout << "Reading enwiki file from: " << enwiki_path;
-                if (max_bytes > 0) cout << " (limited to " << max_bytes << " bytes)";
-                cout << endl;
-
-                std::string enwiki_text = read_enwiki(enwiki_path, max_bytes);
-                cout << "Read " << enwiki_text.size() << " bytes\n";
-
-                // 2) Train a new tokenizer if needed
-                if (!file_exists(tokenizer_path)) {
-                    cout << "Training new BPE tokenizer with vocabulary size " << num_tokens << "...\n";
-                    tokenizer.train(enwiki_text, num_tokens, true);
-                    serialize(tokenizer_path) << tokenizer;
-                    cout << "Tokenizer saved to " << tokenizer_path << endl;
-                }
-                else {
-                    cout << "Loading pre-trained tokenizer from: " << tokenizer_path << endl;
-                    deserialize(tokenizer_path) >> tokenizer;
-                    cout << "Tokenizer loaded successfully with vocabulary size: " << tokenizer.get_vocab_size() << endl;
-                }
-
-                // 3) Tokenize the full text
+                // Tokenize the full text
                 cout << "Tokenizing input text...\n";
                 int text_start_id = tokenizer.get_special_token_id("<text>"),
                     text_end_id = tokenizer.get_special_token_id("</text>");
@@ -1206,7 +1292,7 @@ int main(int argc, char** argv)
                 auto start_time = std::chrono::high_resolution_clock::now();
                 full_tokens.clear();
                 full_tokens.push_back(text_start_id);
-                auto encoded_tokens = tokenizer.encode_raw(enwiki_text);
+                auto encoded_tokens = tokenizer.encode(enwiki_text);
                 full_tokens.insert(full_tokens.end(), encoded_tokens.begin(), encoded_tokens.end());
                 full_tokens.push_back(text_end_id);
                 auto end_time = std::chrono::high_resolution_clock::now();
@@ -1225,8 +1311,9 @@ int main(int argc, char** argv)
                 }
             }
             cout << "Total unique tokens: " << count_unique_tokens(full_tokens) << endl;
+            enwiki_text.clear();
 
-            // 4) Prepare training sequences (sliding window)
+            // Prepare training sequences (sliding window)
             cout << "Preparing training sequences...\n";
             std::vector<matrix<int, 0, 1>> samples;
             std::vector<unsigned long> labels;
@@ -1275,6 +1362,7 @@ int main(int argc, char** argv)
             cout << "Created " << samples.size() << " training samples (100%)...\n";
             int unk_token = tokenizer.get_special_token_id("<unk>"),
                 pad_token = tokenizer.get_special_token_id("<pad>");
+            cout << "PAD token value: " << pad_token << endl;
             augment_training_data(samples, labels, unk_token, pad_token, max_seq_len);
             cout << "Total training samples after augmentation: " << samples.size() << endl;
 
@@ -1431,7 +1519,7 @@ int main(int argc, char** argv)
                 cout << "Using user-provided prompt: \"" << prompt_str << "\"\n";
                 prompt_tokens.clear();
                 prompt_tokens.push_back(text_start_id);
-                auto encoded_tokens = tokenizer.encode_raw(prompt_str);
+                auto encoded_tokens = tokenizer.encode(prompt_str);
                 prompt_tokens.insert(prompt_tokens.end(), encoded_tokens.begin(), encoded_tokens.end());
                 cout << prompt_tokens.size() << " tokens loaded for prompt...\n";
             }
@@ -1489,7 +1577,7 @@ int main(int argc, char** argv)
                     cout << "Tokenizing prompt...\n";
                     prompt_tokens.clear();
                     prompt_tokens.push_back(text_start_id);
-                    auto encoded_tokens = tokenizer.encode_raw(enwiki_prompt);
+                    auto encoded_tokens = tokenizer.encode(enwiki_prompt);
                     prompt_tokens.insert(prompt_tokens.end(), encoded_tokens.begin(), encoded_tokens.end());
                 }
             }
