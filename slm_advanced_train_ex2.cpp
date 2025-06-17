@@ -1070,16 +1070,6 @@ void augment_training_data(std::vector<matrix<int, 0, 1>>& samples, std::vector<
 // ----------------------------------------------------------------------------------------
 int main(int argc, char** argv)
 {
-    {
-        /*TinyGPT::Encoder encoder = TinyGPT::Encoder::getEncoder("./gpt2");
-        auto tokens = encoder.encode("Ceci est un test !");
-        cout << "Tokens IDs: ";
-        for (auto tok : tokens) cout << tok << " | ";
-        cout << endl;
-        auto outputText = encoder.decode(tokens);
-        cout << "Decoded: " << outputText << endl;
-        return 0;*/
-    }
     try
     {
         // Setup interrupt handling for clean termination
