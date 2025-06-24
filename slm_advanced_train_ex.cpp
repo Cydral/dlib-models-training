@@ -56,8 +56,19 @@
 using namespace std;
 using namespace dlib;
 
-namespace ernie
+namespace dlib
 {
+    /*!
+        @class rotary_positional_embedding_
+        @brief Implements Rotary Positional Embeddings (RoPE) for transformers
+
+        This layer applies rotary positional embeddings to queries and keys in
+        self-attention layers, providing relative positional information without
+        absolute position embeddings.
+
+        The implementation follows the RoPE formulation from [2], where positions
+        are encoded through rotation matrices applied to pairs of dimensions.
+    !*/
     class rotary_positional_embedding_ {
     public:
         explicit rotary_positional_embedding_() = default;
@@ -167,38 +178,36 @@ namespace ernie
             tensor_type& x,
             bool is_backward = false
         ) const {
+            DLIB_CASSERT(x.nc() == d_head, "Input dimension must match d_head param");
+            DLIB_CASSERT(x.nr() == seq_len, "Sequence length must match seq_len param");
+
             const long batch_size = x.num_samples();
             const long num_heads = x.k();
-            const long seq_length = x.nr();
-            const long dim = x.nc();
-            const bool is_odd = (dim % 2 != 0);
-            const long rot_dim = is_odd ? dim - 1 : dim;
-
-            DLIB_CASSERT(dim == d_head, "Input dimension must match d_head param");
-            DLIB_CASSERT(seq_length == seq_len, "Sequence length must match seq_len param");
-
+            const bool is_odd = (d_head % 2 != 0);
+            const long rot_dim = is_odd ? d_head - 1 : d_head;
+            
             auto* ptr = x.host();
-            const long stride = seq_length * dim;
+            const long stride = seq_len * d_head;
 
             for (long n = 0; n < batch_size; ++n) {
                 for (long h = 0; h < num_heads; ++h) {
                     auto* x_ptr = ptr + (n * num_heads + h) * stride;
 
-                    for (long pos = 0; pos < seq_length; ++pos) {
+                    for (long pos = 0; pos < seq_len; ++pos) {
                         const float* cos = &cos_values(pos, 0);
                         const float* sin = &sin_values(pos, 0);
 
                         for (long i = 0; i < rot_dim; i += 2) {
-                            const float x0 = x_ptr[pos * dim + i];
-                            const float x1 = x_ptr[pos * dim + i + 1];
+                            const float x0 = x_ptr[pos * d_head + i];
+                            const float x1 = x_ptr[pos * d_head + i + 1];
 
                             if (!is_backward) {
-                                x_ptr[pos * dim + i] = x0 * cos[i / 2] - x1 * sin[i / 2];
-                                x_ptr[pos * dim + i + 1] = x0 * sin[i / 2] + x1 * cos[i / 2];
+                                x_ptr[pos * d_head + i] = x0 * cos[i / 2] - x1 * sin[i / 2];
+                                x_ptr[pos * d_head + i + 1] = x0 * sin[i / 2] + x1 * cos[i / 2];
                             }
                             else {
-                                x_ptr[pos * dim + i] = x0 * cos[i / 2] + x1 * sin[i / 2];
-                                x_ptr[pos * dim + i + 1] = -x0 * sin[i / 2] + x1 * cos[i / 2];
+                                x_ptr[pos * d_head + i] = x0 * cos[i / 2] + x1 * sin[i / 2];
+                                x_ptr[pos * d_head + i + 1] = -x0 * sin[i / 2] + x1 * cos[i / 2];
                             }
                         }
                     }
@@ -226,6 +235,15 @@ namespace ernie
 
     template <long d_k, typename SUBNET>
     using scale_weights = add_layer<scale_weights_<d_k>, SUBNET>;
+
+    template <long d_e_>
+    class scale_embeddings_ : public multiply_ {
+    public:
+        explicit scale_embeddings_() : multiply_(std::sqrt(static_cast<float>(d_e_))) {}
+    };
+
+    template <long d_e, typename SUBNET>
+    using scale_embeddings = add_layer<scale_embeddings_<d_e>, SUBNET>;
 
     // Attention mechanism component extractors
     template <long seq_len, long d_model, long num_heads, typename SUBNET>
@@ -262,14 +280,14 @@ namespace ernie
         tag1<SUBNET>>>>>>>>>>>>>>>>>>>>>;
 
     template <template <typename> class DO, long num_experts, typename SUBNET>
-    using moe_router = softmax<fc<num_experts,
+    using moe_router = softmax<fc<num_experts, avg_pool_everything<
         DO<leaky_relu<fc<16, DO<leaky_relu<fc<32,
-        DO<fc<16, SUBNET>>>>>>>>>>;
+        DO<fc<16, SUBNET>>>>>>>>>>>;
 
     // Single expert network
     template <template <typename> class ACT, template <typename> class DO,
         long d_model, typename SUBNET>
-    using expert = DO<linear<d_model, ACT<DO<linear<d_model * 4, SUBNET>>>>>;
+    using expert = DO<linear<d_model, DO<ACT<linear<d_model * 4, SUBNET>>>>>;
 
     // Combines expert outputs using router probabilities
     // Performs weighted sum of experts with residual connection
@@ -309,12 +327,13 @@ namespace ernie
         multihead_attention<ACT, DO, seq_len, d_model, num_heads, SUBNET>>;
 
     // Positional Embeddings
-    template <long num_embeddings, long embedding_length, typename SUBNET>
-    using positional_embeddings = layer_norm<positional_encodings<embeddings<num_embeddings, embedding_length, SUBNET>>>;
+    template <template <typename> class DO, long num_embeddings, long embedding_length, typename SUBNET>
+    using positional_embeddings = layer_norm<DO<positional_encodings<scale_embeddings<embedding_length,
+        embeddings<num_embeddings, embedding_length, SUBNET>>>>>;
 
     // Classification Head   
-    template <template <typename> class ACT, long num_logits, long embedding_length, typename SUBNET>
-    using classification_head = loss_multiclass_log<fc<num_logits, avg_pool_everything<SUBNET>>>;
+    template <long num_logits, typename SUBNET>
+    using classification_head = loss_multiclass_log<fc<num_logits, SUBNET>>;
 
     /**
      * @brief Transformer Model Configuration Template
@@ -332,10 +351,10 @@ namespace ernie
      * @param dropout_policy Dropout regularization policy
      */
     template <
-        long vocab_size = 5000,                                 // Default vocabulary size
+        long vocab_size = 15000,                                // Default vocabulary size
         long num_layers = 6,                                    // Default number of layers
         long num_heads = 8,                                     // Default number of attention heads
-        long embedding_dim = 128,                               // Default embedding dimension
+        long embedding_dim = 512,                               // Default embedding dimension
         long max_seq_len = 300,                                 // Default maximum sequence length
         template <typename> class activation_func = gelu,       // Default activation function
         template <typename> class dropout_policy = dropout_10   // Default dropout policy
@@ -362,11 +381,6 @@ namespace ernie
 
         // Network component definitions
         template <typename SUBNET>
-        using t_projection = fc<EMBEDDING_DIM, relu<bn_fc<fc<EMBEDDING_DIM * 2, SUBNET>>>>;
-        template <typename SUBNET>
-        using i_projection = fc<EMBEDDING_DIM, relu<affine<fc<EMBEDDING_DIM * 2, SUBNET>>>>;
-
-        template <typename SUBNET>
         using t_transformer_block =
             transformer_block<activation_func, dropout_policy, MAX_SEQ_LEN, EMBEDDING_DIM, NUM_HEADS, SUBNET>;
 
@@ -376,17 +390,17 @@ namespace ernie
 
         template<bool is_training>
         using network_type = std::conditional_t<is_training,
-            classification_head<activation_func, VOCAB_SIZE, EMBEDDING_DIM,
-            t_projection<repeat<NUM_LAYERS, t_transformer_block,
-            positional_embeddings<VOCAB_SIZE, EMBEDDING_DIM, input<matrix<int, 0, 1>>>>>>,
-            classification_head<activation_func, VOCAB_SIZE, EMBEDDING_DIM,
-            i_projection<repeat<NUM_LAYERS, i_transformer_block,
-            positional_embeddings<VOCAB_SIZE, EMBEDDING_DIM, input<matrix<int, 0, 1>>>>>>>;
+            classification_head<VOCAB_SIZE,
+            repeat<NUM_LAYERS, t_transformer_block,
+            positional_embeddings<dropout_policy, VOCAB_SIZE, EMBEDDING_DIM, input<matrix<int, 0, 1>>>>>,
+            classification_head<VOCAB_SIZE,
+            repeat<NUM_LAYERS, i_transformer_block,
+            positional_embeddings<multiply, VOCAB_SIZE, EMBEDDING_DIM, input<matrix<int, 0, 1>>>>>>;
 
         struct model_info {
             static std::string describe() {
                 std::stringstream ss;
-                ss << "ERNIE Transformer model configuration:\n"
+                ss << "Transformer model configuration:\n"
                     << "- vocabulary size: " << VOCAB_SIZE << "\n"
                     << "- layers: " << NUM_LAYERS << "\n"
                     << "- attention heads: " << NUM_HEADS << "\n"
@@ -674,23 +688,22 @@ int main(int argc, char** argv)
         command_line_parser parser;
         parser.add_option("train", "Train a transformer model on enwiki");
         parser.add_option("generate", "Generate enwiki from a previously trained model");
-        parser.add_option("prompt", "Prompt string for text generation", 1);
-        parser.add_option("verify", "Verify generated output against original enwiki");
+        parser.add_option("verify", "Verify generated output against original data");
         parser.add_option("tokenize-only", "Only tokenize the input file and save tokens");
-        parser.add_option("enwiki", "Path to the enwiki file", 1);
+        parser.add_option("enwiki", "Path to the enwiki file (default: enwiki.txt)", 1);
         parser.add_option("max-tokens", "Maximum number of tokens to load in memory", 1);
         parser.add_option("max-bytes", "Maximum number of bytes to process from enwiki", 1);
         parser.add_option("percent", "Percentage of enwiki to process (0-100)", 1);
-        parser.add_option("learning-rate", "Set the learning rate (default: 1e-4)", 1);
+        parser.add_option("learning-rate", "Set the learning rate (default: 3e-4)", 1);
         parser.add_option("batch-size", "Set the mini-batch size (default: 64)", 1);
         parser.add_option("patience", "Iterations without progress before early stopping (default: 15000)", 1);
         parser.add_option("max-epochs", "Maximum number of training epochs (default: 10)", 1);
         parser.add_option("alpha", "Set the weight decay for Adam (default: 0.004)", 1);
         parser.add_option("beta1", "Set Adam's first moment coefficient (default: 0.9)", 1);
         parser.add_option("beta2", "Set Adam's second moment coefficient (default: 0.999)", 1);
-        parser.add_option("model-file", "Path for model (default: ernie_model.dat)", 1);
+        parser.add_option("model-file", "Path for model (default: dlib_slm_enwiki_model.dat)", 1);
         parser.add_option("output-file", "Path for output (default: enwiki_generated.txt)", 1);
-        parser.add_option("tokenizer", "Path to pre-trained tokenizer (default: ernie_tokenizer.vocab)", 1);
+        parser.add_option("tokenizer", "Path to pre-trained tokenizer (default: enwiki_tokenizer.vocab)", 1);
         parser.add_option("tokens-file", "Path to pre-tokenized tokens file (optional)", 1);
         parser.add_option("force-tokenize", "Force tokenization even if tokens file exists");
         parser.parse(argc, argv);
@@ -704,24 +717,24 @@ int main(int argc, char** argv)
         }
 
         // Default values
-        const double learning_rate = get_option(parser, "learning-rate", 1e-4);
+        const double learning_rate = get_option(parser, "learning-rate", 3e-4);
         const size_t batch_size = get_option(parser, "batch-size", 64);
         const long patience = get_option(parser, "patience", 15000);
         const size_t max_epochs = get_option(parser, "max-epochs", 10);
         const double alpha = get_option(parser, "alpha", 0.004);
         const double beta1 = get_option(parser, "beta1", 0.9);
         const double beta2 = get_option(parser, "beta2", 0.999);
-        const std::string model_file = get_option(parser, "model-file", "ernie_model.dat");
+        const std::string model_file = get_option(parser, "model-file", "dlib_slm_enwiki_model.dat");
         const std::string output_file = get_option(parser, "output-file", "enwiki_generated.txt");
-        const std::string enwiki_path = get_option(parser, "enwiki", "enwiki");
-        const long max_seq_len = 200;
-        const long num_layers = 2;
-        const long num_heads = 6;
-        const long embedding_dim = 228;
-        const std::string tokenizer_path = get_option(parser, "tokenizer", "ernie_tokenizer.vocab");
+        const std::string enwiki_path = get_option(parser, "enwiki", "enwiki.txt");
+        const long max_seq_len = 20;
+        const long num_layers = 4;
+        const long num_heads = 8;
+        const long embedding_dim = 256;
+        const std::string tokenizer_path = get_option(parser, "tokenizer", "enwiki_tokenizer.vocab");
         // Default number of prompt tokens = input sequence length
         const bool force_tokenize = parser.option("force-tokenize");
-        const long num_tokens = 3000;
+        const long num_tokens = 8000;
 
         // Calculate max bytes to process
         size_t max_bytes = 0, max_tokens = 0;
@@ -761,7 +774,7 @@ int main(int argc, char** argv)
             parser.option("tokens-file").argument() :
             generate_tokens_filename(enwiki_path, max_bytes);
 
-        using ernie_transformer = ernie::transformer_config<
+        using enwiki_transformer = transformer_config<
             num_tokens,     // vocab_size
             num_layers,     // number of layers
             num_heads,      // number of attention heads
@@ -782,7 +795,7 @@ int main(int argc, char** argv)
         if (parser.option("tokenize-only")) {
             cout << "=== TOKENIZE-ONLY MODE ===\n";
 
-            // 1) Read the enwiki file (or portion)
+            // Read the enwiki file (or portion)
             cout << "Reading enwiki file from: " << enwiki_path;
             if (max_bytes > 0) cout << " (limited to " << max_bytes << " bytes)";
             cout << endl;
@@ -790,15 +803,15 @@ int main(int argc, char** argv)
             std::string enwiki_text = read_enwiki(enwiki_path, max_bytes);
             cout << "Read " << enwiki_text.size() << " bytes\n";
 
-            // 2) Train a new tokenizer if needed
+            // Train a new tokenizer if needed
             if (!file_exists(tokenizer_path)) {
                 cout << "Training new BPE tokenizer with vocabulary size " << num_tokens << "...\n";
-                tokenizer.train(enwiki_text, num_tokens, true);
+                tokenizer.train(enwiki_text, num_tokens, 1e6, true);
                 serialize(tokenizer_path) << tokenizer;
                 cout << "Tokenizer saved to " << tokenizer_path << endl;
             }
 
-            // 3) Tokenize the full text
+            // Tokenize the full text
             cout << "Tokenizing input text...\n";
             auto start_time = std::chrono::high_resolution_clock::now();
             int text_start_id = tokenizer.get_special_token_id("<text>"),
@@ -807,7 +820,7 @@ int main(int argc, char** argv)
                 cout << "Warning: Special tokens not found in tokenizer vocabulary.\n";
             full_tokens.clear();
             full_tokens.push_back(text_start_id);
-            auto encoded_tokens = tokenizer.encode_raw(enwiki_text);
+            auto encoded_tokens = tokenizer.encode(enwiki_text);
             full_tokens.insert(full_tokens.end(), encoded_tokens.begin(), encoded_tokens.end());
             full_tokens.push_back(text_end_id);
             auto end_time = std::chrono::high_resolution_clock::now();
@@ -816,7 +829,7 @@ int main(int argc, char** argv)
             cout << "Tokenization completed in " << tokenize_time << " seconds.\n";
             cout << "Number of tokens: " << full_tokens.size() << endl;
 
-            // 4) Save tokens
+            // Save tokens
             cout << "Saving tokens to file: " << tokens_file << endl;
             if (save_tokens_to_file(full_tokens, tokens_file)) {
                 cout << "Tokens successfully saved.\n";
@@ -861,15 +874,15 @@ int main(int argc, char** argv)
                 std::string enwiki_text = read_enwiki(enwiki_path, max_bytes);
                 cout << "Read " << enwiki_text.size() << " bytes\n";
 
-                // 2) Train a new tokenizer if needed
+                // Train a new tokenizer if needed
                 if (!file_exists(tokenizer_path)) {
                     cout << "Training new BPE tokenizer with vocabulary size " << num_tokens << "...\n";
-                    tokenizer.train(enwiki_text, num_tokens, true);
+                    tokenizer.train(enwiki_text, num_tokens, 1e6, true);
                     serialize(tokenizer_path) << tokenizer;
                     cout << "Tokenizer saved to " << tokenizer_path << endl;
                 }
 
-                // 3) Tokenize the full text
+                // Tokenize the full text
                 cout << "Tokenizing input text...\n";
                 int text_start_id = tokenizer.get_special_token_id("<text>"),
                     text_end_id = tokenizer.get_special_token_id("</text>");
@@ -878,7 +891,7 @@ int main(int argc, char** argv)
                 auto start_time = std::chrono::high_resolution_clock::now();
                 full_tokens.clear();
                 full_tokens.push_back(text_start_id);
-                auto encoded_tokens = tokenizer.encode_raw(enwiki_text);
+                auto encoded_tokens = tokenizer.encode(enwiki_text);
                 full_tokens.insert(full_tokens.end(), encoded_tokens.begin(), encoded_tokens.end());
                 full_tokens.push_back(text_end_id);
                 auto end_time = std::chrono::high_resolution_clock::now();
@@ -897,7 +910,7 @@ int main(int argc, char** argv)
                 }
             }
 
-            // 4) Prepare training sequences (sliding window)
+            // Prepare training sequences (sliding window)
             cout << "Preparing training sequences...\n";
             std::vector<matrix<int, 0, 1>> samples;
             std::vector<unsigned long> labels;
@@ -915,7 +928,7 @@ int main(int argc, char** argv)
             // For very large datasets, using a stride can reduce training time 
             // without significantly affecting model quality
             size_t stride = 1;  // Default: use every possible sequence
-            const size_t max_samples = 10000000;  // Optional: limit total samples to prevent memory issues
+            const size_t max_samples = 10e6;  // Optional: limit total samples to prevent memory issues
 
             // If dataset is very large, use adaptive stride
             if (num_sequences > max_samples && max_samples > 0) {
@@ -945,10 +958,10 @@ int main(int argc, char** argv)
             full_tokens.clear();
             cout << "Created " << samples.size() << " training samples (100%)...\n";
 
-            // 5) Build and train the network
-            using net_type = ernie_transformer::network_type<true>;
+            // Build and train the network
+            using net_type = enwiki_transformer::network_type<true>;
             net_type net;
-            cout << "Model architecture:\n" << ernie_transformer::model_info::describe() << endl;
+            cout << "Model architecture:\n" << enwiki_transformer::model_info::describe() << endl;
             if (file_exists(model_file)) deserialize(model_file) >> net;
 
             // Create trainer
@@ -959,7 +972,7 @@ int main(int argc, char** argv)
             // For perfect memorization, we allow more epochs without improvement
             trainer.set_iterations_without_progress_threshold(patience);
             trainer.set_max_num_epochs(max_epochs); // More epochs for perfect memorization
-            trainer.set_synchronization_file("ernie_trainer.sync", std::chrono::minutes(10));
+            trainer.set_synchronization_file("enwiki_trainer.sync", std::chrono::minutes(10));
             trainer.be_quiet();
 
             // Custom training loop - trainer.train(samples, labels)
@@ -1026,29 +1039,31 @@ int main(int argc, char** argv)
 
             // Save model
             net.clean();
-            serialize(model_file) << net;
+            serialize(model_file) << net << tokenizer;
             cout << "Model saved to " << model_file << "\n";
-            std::remove("ernie_trainer.sync");
-            std::remove("ernie_trainer.sync_");
+            std::remove("enwiki_trainer.sync");
+            std::remove("enwiki_trainer.sync_");
 
             // Evaluate on training set
-            if (!g_terminate_flag.load()) {
-                cout << "Evaluating model accuracy...\n";
-                using net_infer = ernie_transformer::network_type<false>;
-                net_infer g_infer = net;
-                auto predicted = g_infer(samples);
-                size_t correct = 0;
-                for (size_t i = 0; i < labels.size(); ++i)
-                    if (predicted[i] == labels[i]) correct++;
-                double accuracy = (double)correct / labels.size();
-                cout << "Training accuracy: " << fixed << setprecision(2) << (accuracy * 100.0) << "%\n";
+            {
+                if (!g_terminate_flag.load()) {
+                    cout << "Evaluating model accuracy...\n";
+                    using net_infer = enwiki_transformer::network_type<false>;
+                    net_infer g_infer = net;
+                    auto predicted = g_infer(samples);
+                    size_t correct = 0;
+                    for (size_t i = 0; i < labels.size(); ++i)
+                        if (predicted[i] == labels[i]) correct++;
+                    double accuracy = (double)correct / labels.size();
+                    cout << "Training accuracy: " << (accuracy * 100.0) << "%\n";
 
-                // We need perfect accuracy to reconstruct enwiki
-                if (accuracy < 0.9999) {
-                    cout << "WARNING: Model accuracy is less than 99.99%. The model may not "
-                        << "perfectly reconstruct the input text.\n";
+                    // We need perfect accuracy to reconstruct enwiki
+                    if (accuracy < 0.999) {
+                        cout << "WARNING: Model accuracy is less than 99.90%. The model may not "
+                            << "perfectly reconstruct the input text.\n";
+                    }
                 }
-            }
+            }            
         }
 
         // ----------------------------------------------------------------------------------------
@@ -1058,11 +1073,11 @@ int main(int argc, char** argv)
         {
             cout << "=== GENERATION MODE ===\n";
 
-            // 1) Load the model
-            using net_infer = ernie_transformer::network_type<false>;
+            // Load the model
+            using net_infer = enwiki_transformer::network_type<false>;
             net_infer net;
             if (file_exists(model_file)) {
-                deserialize(model_file) >> net;
+                deserialize(model_file) >> net >> tokenizer;
                 cout << "Loaded model from " << model_file << "\n";
                 cout << "Number of model parameters: " << count_parameters(net) << endl;
             }
@@ -1071,108 +1086,91 @@ int main(int argc, char** argv)
                 return 0;
             }
 
-            // 2) Check that tokenizer is loaded
+            // Check that tokenizer is loaded
             if (tokenizer.get_vocab_size() == 0) {
                 cerr << "Error: Tokenizer not loaded. Please provide a valid tokenizer file.\n";
                 return 0;
             }
-            int text_start_id = tokenizer.get_special_token_id("<text>"),
-                text_end_id = tokenizer.get_special_token_id("</text>");
-            if (text_start_id < 0 || text_end_id < 0)
-                cout << "Warning: Special tokens not found in tokenizer vocabulary.\n";
-            
+
+            // Read beginning of enwiki file for prompt
             std::vector<int> prompt_tokens;
-            const std::string prompt_str = get_option(parser, "prompt", "");
-            bool user_prompt = !prompt_str.empty();
-            if (user_prompt) {
-                cout << "Using user-provided prompt: \"" << prompt_str << "\"\n";
-                prompt_tokens.clear();
-                prompt_tokens.push_back(text_start_id);
-                auto encoded_tokens = tokenizer.encode_raw(prompt_str);
-                prompt_tokens.insert(prompt_tokens.end(), encoded_tokens.begin(), encoded_tokens.end());
-                cout << prompt_tokens.size() << " tokens loaded for prompt...\n";
+
+            // Check if we have pre-tokenized tokens
+            if (file_exists(tokens_file)) {
+                cout << "Found pre-tokenized tokens file: " << tokens_file << endl;
+                cout << "Loading tokens for prompt...\n";
+
+                // We only need max_seq_len tokens, so we can load
+                // just the necessary part of the file
+                std::ifstream file(tokens_file, std::ios::binary);
+                if (!file) {
+                    cerr << "Failed to open tokens file: " << tokens_file << endl;
+                }
+                else {
+                    // Read total number of tokens
+                    uint64_t num_tokens;
+                    file.read(reinterpret_cast<char*>(&num_tokens), sizeof(num_tokens));
+
+                    // Read only the first max_seq_len tokens
+                    size_t tokens_to_read = std::min(static_cast<size_t>(max_seq_len), static_cast<size_t>(num_tokens));
+                    prompt_tokens.resize(tokens_to_read);
+
+                    for (size_t i = 0; i < tokens_to_read; ++i) {
+                        uint32_t t;
+                        file.read(reinterpret_cast<char*>(&t), sizeof(t));
+                        prompt_tokens[i] = static_cast<int>(t);
+                    }
+
+                    cout << "Loaded " << prompt_tokens.size() << " tokens for prompt from file.\n";
+                }
             }
-            else { // 3) Read beginning of enwiki file for prompt
-                // Check if we have pre-tokenized tokens
-                if (file_exists(tokens_file)) {
-                    cout << "Found pre-tokenized tokens file: " << tokens_file << endl;
-                    cout << "Loading tokens for prompt...\n";
 
-                    // We only need max_seq_len tokens, so we can load
-                    // just the necessary part of the file
-                    std::ifstream file(tokens_file, std::ios::binary);
-                    if (!file) {
-                        cerr << "Failed to open tokens file: " << tokens_file << endl;
-                    }
-                    else {
-                        // Read total number of tokens
-                        uint64_t num_tokens;
-                        file.read(reinterpret_cast<char*>(&num_tokens), sizeof(num_tokens));
+            // If we couldn't load tokens, tokenize the prompt text
+            if (prompt_tokens.empty()) {
+                cout << "Reading initial prompt from enwiki...\n";
+                std::string enwiki_prompt;
 
-                        // Read only the first max_seq_len tokens
-                        size_t tokens_to_read = std::min(static_cast<size_t>(max_seq_len), static_cast<size_t>(num_tokens));
-                        prompt_tokens.resize(tokens_to_read);
-
-                        for (size_t i = 0; i < tokens_to_read; ++i) {
-                            uint32_t t;
-                            file.read(reinterpret_cast<char*>(&t), sizeof(t));
-                            prompt_tokens[i] = static_cast<int>(t);
-                        }
-
-                        cout << "Loaded " << prompt_tokens.size() << " tokens for prompt from file.\n";
-                    }
+                if (file_exists(enwiki_path)) {
+                    // Read a portion large enough to cover the first tokens
+                    std::ifstream file(enwiki_path, std::ios::binary);
+                    // Buffer intentionally large to ensure we have enough text for tokens
+                    char buffer[max_seq_len * 10];
+                    file.read(buffer, sizeof(buffer));
+                    size_t bytes_read = file.gcount();
+                    enwiki_prompt = std::string(buffer, bytes_read);
+                }
+                else {
+                    cerr << "Error: Cannot find original enwiki file for initial prompt.\n";
+                    return 0;
                 }
 
-                // If we couldn't load tokens, tokenize the prompt text
-                if (prompt_tokens.empty()) {
-                    cout << "Reading initial prompt from enwiki...\n";
-                    std::string enwiki_prompt;
-
-                    if (file_exists(enwiki_path)) {
-                        // Read a portion large enough to cover the first tokens
-                        std::ifstream file(enwiki_path, std::ios::binary);
-                        // Buffer intentionally large to ensure we have enough text for tokens
-                        char buffer[max_seq_len * 10];
-                        file.read(buffer, sizeof(buffer));
-                        size_t bytes_read = file.gcount();
-                        enwiki_prompt = std::string(buffer, bytes_read);
-                    }
-                    else {
-                        cerr << "Error: Cannot find original enwiki file for initial prompt.\n";
-                        return 0;
-                    }
-
-                    // Tokenize the prompt
-                    cout << "Tokenizing prompt...\n";
-                    prompt_tokens.clear();
-                    prompt_tokens.push_back(text_start_id);
-                    auto encoded_tokens = tokenizer.encode_raw(enwiki_prompt);
-                    prompt_tokens.insert(prompt_tokens.end(), encoded_tokens.begin(), encoded_tokens.end());
-                }
+                // Tokenize the prompt
+                cout << "Tokenizing prompt...\n";
+                int text_start_id = tokenizer.get_special_token_id("<text>");
+                prompt_tokens.clear();                
+                prompt_tokens.push_back(text_start_id);
+                auto encoded_tokens = tokenizer.encode(enwiki_prompt);
+                prompt_tokens.insert(prompt_tokens.end(), encoded_tokens.begin(), encoded_tokens.end());
             }
 
             // Limit to requested number of tokens (exact, no padding)
             if (prompt_tokens.size() > (size_t)max_seq_len) {
                 prompt_tokens.resize(max_seq_len);
-                cout << "Prompt truncated to " << max_seq_len << " tokens.\n";
             }
             else if (prompt_tokens.size() < (size_t)max_seq_len) {
-                cout << "Warning: Not enough tokens in prompt. Got " << prompt_tokens.size()
-                    << ", needed " << max_seq_len << ".\n";
-                int pad_token_id = tokenizer.get_special_token_id("<pad>");
-                size_t pad_count = max_seq_len - prompt_tokens.size();
-                cout << "Padding prompt with " << pad_count << " pad tokens (id=" << pad_token_id << ").\n";
-                prompt_tokens.insert(prompt_tokens.begin(), pad_count, pad_token_id);
+                cerr << "Warning: Not enough tokens in prompt. Got " << prompt_tokens.size()
+                    << ", needed " << max_seq_len << ". Consider using a larger input file.\n";
+                return 0;
             }
             cout << "Using " << prompt_tokens.size() << " tokens for initial prompt\n";
 
-            // 5) Put prompt in input sequence
+            // Put prompt in input sequence
             matrix<int, 0, 1> input_seq(max_seq_len, 1);
             for (long i = 0; i < max_seq_len; ++i) {
                 input_seq(i, 0) = prompt_tokens[i];
             }
 
-            // 6) Determine text size to generate
+            // Determine text size to generate
             size_t target_size = 0;
             if (max_bytes > 0) {
                 target_size = max_bytes;
@@ -1186,18 +1184,18 @@ int main(int argc, char** argv)
             }
             cout << "Will generate approximately " << target_size << " bytes\n";
 
-            // 7) Open output file
+            // Open output file
             std::ofstream outfile(output_file, std::ios::binary);
             if (!outfile) {
                 cerr << "Error: Cannot open output file: " << output_file << "\n";
                 return 0;
             }
 
-            // 8) Write initial text (corresponding to prompt tokens)
+            // Write initial text (corresponding to prompt tokens)
             std::string initial_text = tokenizer.decode(prompt_tokens, false);
             outfile.write(initial_text.c_str(), initial_text.size());
 
-            // 9) Generate the rest of the text autoregressively
+            // Generate the rest of the text autoregressively
             cout << "Starting autoregressive generation...\n";
 
             // Buffer for accumulation before writing
@@ -1208,20 +1206,18 @@ int main(int argc, char** argv)
             auto start_time = std::chrono::high_resolution_clock::now();
             size_t total_bytes = initial_text.size();
             size_t token_count = prompt_tokens.size();
-            size_t tokens_generated = 0;
-            bool stop_generation = false;
 
             // Generate until target size is reached
             int start_of_text = tokenizer.get_special_token_id("<text>"),
                 end_of_text = tokenizer.get_special_token_id("</text>"), next_token = 0;
-            while (!stop_generation && total_bytes < target_size
-                && next_token != start_of_text && next_token != end_of_text
+            while (total_bytes < target_size && next_token != start_of_text && next_token != end_of_text
                 && !g_terminate_flag.load()) {
                 // Predict next token
-                next_token = net(input_seq);
+                std::vector<matrix<int, 0, 1>> in_tokens = { input_seq, input_seq };
+                auto out_token = net(in_tokens);
+                next_token = static_cast<int>(out_token[0]);
                 token_buffer.push_back(next_token);
                 token_count++;
-                tokens_generated++;
 
                 // Shift the input window
                 for (long i = 0; i < max_seq_len - 1; ++i)
@@ -1250,21 +1246,6 @@ int main(int argc, char** argv)
                         << " seconds\r";
                 }
                 if (max_tokens > 0 && token_count >= max_tokens) break;
-                if (user_prompt) {
-                    if (tokens_generated >= 500) {
-                        cout << "\nStopping: Generated 500 tokens\n";
-                        stop_generation = true;
-                    }                    
-                    else {
-                        // Check for '.' in decoded token
-                        std::vector<int> current_token{ next_token };
-                        std::string decoded_token = tokenizer.decode(current_token, false);
-                        if (decoded_token.find('.') != std::string::npos) {
-                            cout << "\nStopping: '.' detected in generated text\n";
-                            stop_generation = true;
-                        }
-                    }
-                }
             }
 
             // Flush remaining buffer
@@ -1291,7 +1272,7 @@ int main(int argc, char** argv)
         // ----------------------------------------------------------------------------------------
         if (parser.option("verify"))
         {
-            cout << "=== VERIFicAtiON MODE ===\n";
+            cout << "=== VERIFICATION MODE ===\n";
 
             if (!file_exists(enwiki_path)) {
                 cerr << "Error: Original enwiki file not found at " << enwiki_path << "\n";
